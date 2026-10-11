@@ -19,8 +19,7 @@
   * { box-sizing:border-box; margin:0; padding:0; }
   body { background:var(--paper); color:var(--black); font-family:"Fredoka", system-ui, sans-serif; font-weight:500;
          min-height:100vh; display:flex; flex-direction:column; padding:1.5rem clamp(1.25rem, 4vw, 3.5rem) 2rem; }
-  header a { display:inline-flex; align-items:center; gap:0.6rem; color:var(--black); text-decoration:none; font-weight:700; font-size:1.35rem; }
-  header img { width:44px; height:44px; border-radius:50%; border:3px solid var(--black); display:block; }
+  header img { width:56px; height:56px; border-radius:50%; border:3px solid var(--black); background:#fff; object-fit:cover; display:block; }
   main { flex:1; display:grid; grid-template-columns:1fr 1fr; align-items:center; gap:2rem; }
   h1 { font-weight:700; font-size:clamp(4rem, 11vw, 10rem); line-height:0.95; letter-spacing:-0.01em;
        -webkit-text-stroke:0.06em var(--black); paint-order:stroke fill; text-shadow:0.06em 0.06em 0 var(--black); }
@@ -44,7 +43,7 @@
 </style>
 </head>
 <body>
-<header><a href="/"><img src="favicon-48.png" alt="" width="44" height="44">evenstevenbot</a></header>
+<header><img src="head.jpg" alt="evenstevenbot logo"></header>
 <main>
   <section>
     <h1><span class="pink">hello,</span><span class="cyan">world.</span></h1>
