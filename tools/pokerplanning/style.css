@@ -158,3 +158,6 @@ input:focus-visible{outline:3px solid var(--cyan);outline-offset:1px}
 }
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 .error:empty{display:none}
+.site-footer{text-align:center;padding:2rem 1rem 2.5rem;color:var(--muted);font-size:.85rem}
+.site-footer p{margin:0 0 .6rem}
+.site-footer .bmc{display:flex;justify-content:center;min-height:52px}
