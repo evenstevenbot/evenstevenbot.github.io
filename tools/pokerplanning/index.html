@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>planning poker · evenstevenbot</title>
+<meta name="description" content="Free real-time scrum planning poker with Fibonacci cards and a shared timer.">
+<link rel="icon" type="image/png" href="../../favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <a class="brand" href="/" aria-label="evenstevenbot home">
+    <img src="../../head.jpg" alt="" width="40" height="40">
+    <span>planning poker</span>
+  </a>
+  <div class="room-bar" id="roomBar" hidden>
+    <span class="status" id="status" role="status" aria-live="polite"><i aria-hidden="true"></i><span>connecting…</span></span>
+    <span class="code" title="Room code">room <b id="roomCode">------</b></span>
+    <button class="btn ghost sm" id="copyLink" type="button">copy link</button>
+    <button class="btn ghost sm" id="leave" type="button">leave</button>
+  </div>
+</header>
+
+<main id="main">
+  <!-- Join screen -->
+  <section class="join" id="joinView" aria-labelledby="joinTitle">
+    <div class="join-card">
+      <img class="join-avatar" id="joinAvatar" alt="Your avatar preview" width="112" height="112">
+      <h1 id="joinTitle">planning poker</h1>
+      <p class="muted" id="joinSub">Estimate together with Fibonacci cards and a shared timer. No sign-up.</p>
+      <form id="joinForm" autocomplete="off">
+        <label for="nameInput">Your name</label>
+        <input id="nameInput" name="name" maxlength="24" required placeholder="e.g. Steven">
+        <div class="join-actions" id="createActions">
+          <button class="btn primary" type="submit" id="joinBtn">create a room</button>
+        </div>
+        <div class="or" id="orRow"><span>or join one</span></div>
+        <div class="code-row" id="codeRow">
+          <label class="sr" for="codeInput">Room code</label>
+          <input id="codeInput" maxlength="6" placeholder="ROOM CODE" autocapitalize="characters" spellcheck="false">
+          <button class="btn ghost" type="button" id="joinCodeBtn">join</button>
+        </div>
+        <p class="error" id="joinError" role="alert"></p>
+      </form>
+    </div>
+  </section>
+
+  <!-- Room screen -->
+  <section class="room" id="roomView" hidden aria-label="Planning room">
+    <div class="banner" id="banner" role="alert" hidden></div>
+    <div class="room-grid">
+      <div class="col-main">
+        <div class="story">
+          <label for="storyInput">Story / ticket</label>
+          <input id="storyInput" maxlength="140" placeholder="What are we estimating? (shared with the room)">
+        </div>
+
+        <div class="table" id="table" aria-label="Players">
+          <ul class="players" id="players"></ul>
+          <div class="table-actions">
+            <button class="btn pink" id="revealBtn" type="button">reveal cards</button>
+            <button class="btn ghost" id="resetBtn" type="button">new round</button>
+          </div>
+          <p class="hint muted" id="voteHint"></p>
+        </div>
+
+        <div class="results" id="results" hidden aria-live="polite">
+          <div class="stat"><span class="muted">average</span><b id="avg">–</b></div>
+          <div class="stat"><span class="muted">votes</span><b id="voteCount">0</b></div>
+          <div class="dist" id="dist"></div>
+          <div class="consensus" id="consensus" hidden>consensus!</div>
+        </div>
+      </div>
+
+      <aside class="col-side">
+        <div class="timer" id="timer" aria-label="Shared timer">
+          <div class="dial">
+            <svg viewBox="0 0 120 120" aria-hidden="true">
+              <circle class="track" cx="60" cy="60" r="52"/>
+              <circle class="prog" id="timerProg" cx="60" cy="60" r="52"/>
+            </svg>
+            <div class="time" id="timeText" role="timer" aria-live="off">1:00</div>
+          </div>
+          <p class="times-up" id="timesUp" aria-live="assertive"></p>
+          <div class="presets" role="group" aria-label="Timer length" id="presets"></div>
+          <div class="timer-ctrl">
+            <button class="btn cyan" id="timerStart" type="button">start</button>
+            <button class="btn ghost" id="timerReset" type="button">reset</button>
+          </div>
+          <label class="toggle"><input type="checkbox" id="autoReveal"> <span>auto-reveal when time's up</span></label>
+        </div>
+        <div class="share">
+          <p class="muted">Invite your team</p>
+          <div class="share-row">
+            <input id="shareUrl" readonly aria-label="Room link">
+            <button class="btn ghost sm" id="copyLink2" type="button">copy</button>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <div class="deck-wrap">
+      <p class="deck-label" id="deckLabel">pick a card</p>
+      <div class="deck" id="deck" role="group" aria-labelledby="deckLabel"></div>
+    </div>
+  </section>
+</main>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
