@@ -33,7 +33,18 @@
   .btn:active { transform:translate(2px,2px); box-shadow:2px 2px 0 var(--black); }
   .art img { width:100%; max-width:640px; height:auto; display:block; margin-left:auto; }
   .swatches { display:flex; gap:0.9rem; margin-top:2rem; }
-  .swatches span { width:clamp(48px, 7vw, 88px); height:clamp(32px, 4.5vw, 52px); border-radius:4px; }
+  .swatches { align-items:center; }
+  .swatches span, .swatches .poker { width:clamp(48px, 7vw, 88px); height:clamp(32px, 4.5vw, 52px); border-radius:4px; }
+  .swatches .poker { position:relative; display:block; background:var(--pink); border-radius:6px; text-decoration:none;
+          transition:transform .15s ease, box-shadow .15s ease; box-shadow:0 0 0 0 var(--black); }
+  .swatches .poker svg { position:absolute; inset:0; width:100%; height:100%; overflow:visible; }
+  .swatches .poker .c1 { transform-box:fill-box; transform-origin:50% 100%; transition:transform .2s ease; transform:rotate(-14deg); }
+  .swatches .poker .c2 { transform-box:fill-box; transform-origin:50% 100%; transition:transform .2s ease; transform:rotate(10deg); }
+  .swatches .poker:hover, .swatches .poker:focus-visible { transform:translate(-2px,-3px); box-shadow:4px 4px 0 var(--black); outline:none; }
+  .swatches .poker:hover .c1, .swatches .poker:focus-visible .c1 { transform:rotate(-22deg) translateY(-2px); }
+  .swatches .poker:hover .c2, .swatches .poker:focus-visible .c2 { transform:rotate(18deg) translateY(-2px); }
+  .swatches .poker:focus-visible { box-shadow:4px 4px 0 var(--black), 0 0 0 3px var(--cyan); }
+  @media (prefers-reduced-motion: reduce) { .swatches .poker, .swatches .poker * { transition:none; } }
   footer { margin-top:1rem; font-size:0.85rem; color:#6b6b6b; }
   @media (max-width: 800px) {
     main { grid-template-columns:1fr; text-align:center; }
@@ -52,8 +63,19 @@
   </section>
   <div class="art"><img src="mascot.png" alt="evenstevenbot mascot, a white robot with headphones waving"></div>
 </main>
-<div class="swatches" aria-hidden="true">
-  <span style="background:#FF2E88"></span><span style="background:#00E5FF"></span><span style="background:#FFE600"></span><span style="background:#FF6A00"></span><span style="background:#111111"></span>
+<div class="swatches">
+  <a class="poker" href="/tools/pokerplanning/" aria-label="Play planning poker" title="planning poker">
+    <svg viewBox="0 0 88 52" aria-hidden="true">
+      <g class="c1">
+        <rect x="22" y="6" width="26" height="38" rx="4" fill="#fff" stroke="#111" stroke-width="2.5"/>
+        <text x="35" y="31" text-anchor="middle" font-family="Fredoka, sans-serif" font-weight="700" font-size="18" fill="#00E5FF" stroke="#111" stroke-width="1.2" paint-order="stroke">5</text>
+      </g>
+      <g class="c2">
+        <rect x="40" y="6" width="26" height="38" rx="4" fill="#FFE600" stroke="#111" stroke-width="2.5"/>
+        <text x="53" y="31" text-anchor="middle" font-family="Fredoka, sans-serif" font-weight="700" font-size="18" fill="#FF2E88" stroke="#111" stroke-width="1.2" paint-order="stroke">8</text>
+      </g>
+    </svg>
+  </a><span aria-hidden="true" style="background:#00E5FF"></span><span aria-hidden="true" style="background:#FFE600"></span><span aria-hidden="true" style="background:#FF6A00"></span><span aria-hidden="true" style="background:#111111"></span>
 </div>
 <footer>evenstevenbot · 2026</footer>
 </body>
