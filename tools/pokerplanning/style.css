@@ -160,4 +160,7 @@ input:focus-visible{outline:3px solid var(--cyan);outline-offset:1px}
 .error:empty{display:none}
 .site-footer{text-align:center;padding:2rem 1rem 2.5rem;color:var(--muted);font-size:.85rem}
 .site-footer p{margin:0 0 .6rem}
-.site-footer .bmc{display:flex;justify-content:center;min-height:52px}
+.site-footer .bmc{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;min-height:42px;width:100%}
+.site-footer .bmc .bmc-btn{height:42px !important;min-width:147px !important;font-size:17px !important;padding:0 17px !important;border-radius:9px !important;line-height:19px !important;margin:0 auto !important}
+.site-footer .bmc .bmc-btn svg{height:22px !important}
+.site-footer .bmc .bmc-btn-text{font-size:17px !important;margin-left:7px !important}
