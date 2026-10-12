@@ -19,7 +19,13 @@ const HEARTBEAT = 2500, TIMEOUT = 9000;
 // set METERED_TURN_URL to a Metered credentials URL (free account; the API key is safe in front-end code), e.g.
 // 'https://<app>.metered.live/api/v1/turn/credentials?apiKey=<KEY>'. Or list static servers in TURN_SERVERS.
 const STUN_SERVERS = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }];
-const TURN_SERVERS = [];
+const TURN_SERVERS = [
+  { urls: 'stun:stun.relay.metered.ca:80' },
+  { urls: 'turn:global.relay.metered.ca:80', username: '11e7f7e524b90908684f5501', credential: '/Qxb9srjvqvqJtBJ' },
+  { urls: 'turn:global.relay.metered.ca:80?transport=tcp', username: '11e7f7e524b90908684f5501', credential: '/Qxb9srjvqvqJtBJ' },
+  { urls: 'turn:global.relay.metered.ca:443', username: '11e7f7e524b90908684f5501', credential: '/Qxb9srjvqvqJtBJ' },
+  { urls: 'turns:global.relay.metered.ca:443?transport=tcp', username: '11e7f7e524b90908684f5501', credential: '/Qxb9srjvqvqJtBJ' },
+];
 const METERED_TURN_URL = '';
 const IS_LOCAL = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
 const FORCE_RELAY = IS_LOCAL && new URLSearchParams(location.search).has('relayonly');   // test hook
