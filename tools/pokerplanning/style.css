@@ -23,7 +23,7 @@ body{background:var(--paper);color:var(--black);font-family:"Fredoka",system-ui,
 .code{font-size:.95rem;color:var(--muted)} .code b{color:var(--black);font-weight:600;letter-spacing:.08em;margin-left:.2rem}
 .status{display:inline-flex;align-items:center;gap:.4rem;font-size:.85rem;color:var(--muted)}
 .status i{width:9px;height:9px;border-radius:50%;background:#bbb;display:inline-block}
-.status.ok i{background:#16c172} .status.warn i{background:var(--orange);animation:blink 1s infinite}
+.status.ok i{background:#16c172}  .status.err i{background:#e5484d} .status.warn i{background:var(--orange);animation:blink 1s infinite}
 @keyframes blink{50%{opacity:.3}}
 
 /* buttons */

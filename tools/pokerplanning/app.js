@@ -4,6 +4,11 @@
  * room code and holds the authoritative state; everyone else connects to that id.
  * If the host leaves, the remaining players race (staggered by join order) to claim the
  * host id; the winner rebuilds state from its last snapshot and the others reconnect.
+ *
+ * Relay mode (preferred, works behind corporate proxies like Zscaler): when RELAY_URL is set,
+ * the room lives in a Cloudflare Durable Object (repo evenstevenbot/poker-relay). Clients talk
+ * to it over WSS on 443 and fall back to plain HTTPS long-polling if WebSockets are stripped.
+ * PeerJS is only used if the relay can't be reached at all on first connect.
  */
 (() => {
 'use strict';
@@ -14,6 +19,15 @@ const AVATAR = 'https://api.dicebear.com/10.x/notionists/svg?seed=';
 const TINTS = ['#FFE3EF','#D9FAFF','#FFF9C2','#FFE6D5','#ECEAE4'];
 const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const HEARTBEAT = 2500, TIMEOUT = 9000;
+// Room relay (Cloudflare Worker + Durable Object). Leave '' to use PeerJS only.
+// e.g. 'https://poker-relay.<subdomain>.workers.dev' or 'https://poker.techirvine.com'
+const RELAY_DEFAULT = '';
+const IS_LOCAL = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
+const RELAY_URL = ((IS_LOCAL && new URLSearchParams(location.search).get('relay')) || RELAY_DEFAULT).replace(/\/+$/, '');
+const FORCE_POLL = new URLSearchParams(location.search).has('poll');   // test hook: skip WebSockets
+const BLOCKED_MSG = "Can't reach the room server. Your network may be blocking it. Ask IT to allow it, or try another network.";
+let useRelay = !!RELAY_URL;
+let relay = null, relayEverUp = false, relayWsBroken = FORCE_POLL;
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -61,6 +75,7 @@ function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.ad
 
 function destroyPeer() {
   clearTimeout(retryTimer);
+  destroyRelay();
   if (hostConn) { try { hostConn.close(); } catch {} hostConn = null; }
   for (const c of conns.keys()) { try { c.close(); } catch {} }
   conns.clear();
@@ -71,6 +86,7 @@ function retryLater(fn, why) {
   attempts++;
   const delay = Math.min(1000 * attempts, 6000) + Math.random() * 400;
   setStatus('warn', why || 'reconnecting…');
+  if (attempts >= 4) { banner(BLOCKED_MSG); setStatus('err', 'can\'t connect'); }
   clearTimeout(retryTimer);
   retryTimer = setTimeout(fn, delay);
 }
@@ -149,6 +165,98 @@ function hostLost(reason) {
   const delay = (wasConnected ? rank * 1500 : Math.min(800 * attempts, 5000)) + Math.random() * 300;
   clearTimeout(retryTimer);
   retryTimer = setTimeout(tryClaimHost, delay);
+}
+
+// ---- relay transport --------------------------------------------------------
+const helloMsg = () => ({ t: 'hello', id: me.id, name: me.name, vote: me.vote, round: me.round, joinedAt: me.joinedAt });
+function destroyRelay() {
+  if (!relay) return;
+  const r = relay; relay = null;
+  if (r.ws) { r.ws.onclose = r.ws.onmessage = r.ws.onopen = null; try { r.ws.close(); } catch {} }
+  if (r.ac) try { r.ac.abort(); } catch {}
+}
+function relayConnect() {
+  if (leaving) return;
+  clearTimeout(retryTimer);
+  destroyRelay();
+  role = 'connecting';
+  setStatus('warn', 'connecting…');
+  const r = relay = { mode: null, ver: -1, ws: null, ac: new AbortController() };
+  if (relayWsBroken) return startPoll(r);
+  let ws, opened = false;
+  try { ws = new WebSocket(RELAY_URL.replace(/^http/, 'ws') + `/rooms/${room}/ws`); } catch { relayWsBroken = true; return startPoll(r); }
+  r.ws = ws;
+  const t = setTimeout(() => { if (relay === r && !opened) { ws.onclose = null; try { ws.close(); } catch {} relayWsBroken = true; startPoll(r); } }, 6000);
+  ws.onopen = () => {
+    if (relay !== r) return;
+    opened = true; clearTimeout(t); r.mode = 'ws';
+    ws.send(JSON.stringify(helloMsg()));
+  };
+  ws.onmessage = (e) => {
+    if (relay !== r) return;
+    lastHostMsg = now();
+    let d; try { d = JSON.parse(e.data); } catch { return; }
+    if (d.t === 'state') { if (role !== 'client') relayUp(r); applyView(d); }
+    else if (d.t === 'rejoin') ws.send(JSON.stringify(helloMsg()));
+  };
+  ws.onclose = () => {
+    if (relay !== r) return;
+    clearTimeout(t);
+    if (!opened) { relayWsBroken = true; startPoll(r); }   // WS upgrade blocked: use HTTPS polling
+    else relayLost();
+  };
+}
+function relayUp(r) {
+  role = 'client'; attempts = 0; relayEverUp = true; lastHostMsg = now();
+  banner(null); setStatus('ok', r.mode === 'poll' ? 'connected · https' : 'connected');
+}
+async function relayPost(msg) {
+  // text/plain keeps this a "simple" CORS request (no preflight)
+  const res = await fetch(`${RELAY_URL}/rooms/${room}/send`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ ...msg, pid: me.id }), cache: 'no-store' });
+  if (!res.ok) throw new Error('relay ' + res.status);
+  return res.json();
+}
+async function startPoll(r) {
+  if (relay !== r) return;
+  r.mode = 'poll'; r.ws = null;
+  try {
+    const v = await relayPost(helloMsg());
+    if (relay !== r) return;
+    relayUp(r); r.ver = v.ver; applyView(v);
+  } catch { if (relay === r) relayFailed(); return; }
+  while (relay === r) {
+    try {
+      const res = await fetch(`${RELAY_URL}/rooms/${room}/poll?pid=${encodeURIComponent(me.id)}&v=${r.ver}`, { cache: 'no-store', signal: r.ac.signal });
+      if (!res.ok) throw new Error('relay ' + res.status);
+      const d = await res.json();
+      if (relay !== r) return;
+      lastHostMsg = now();
+      if (d.rejoin) { const v = await relayPost(helloMsg()); if (relay !== r) return; r.ver = v.ver; applyView(v); continue; }
+      r.ver = d.ver; applyView(d);
+    } catch { if (relay === r) relayLost(); return; }
+  }
+}
+function relayFailed() {
+  // never reached the relay (neither WSS nor HTTPS)
+  if (!relayEverUp && typeof Peer !== 'undefined') {
+    destroyRelay(); useRelay = false; attempts = 0;
+    toast('Room server unreachable, trying peer-to-peer…');
+    tryClaimHost(); return;
+  }
+  relayLost();
+}
+function relayLost() {
+  if (leaving) return;
+  destroyRelay();
+  role = 'connecting';
+  if (lastView && relayEverUp) banner('Lost the connection to the room. Reconnecting… your vote and the timer are kept.');
+  retryLater(relayConnect, 'reconnecting…');
+}
+function relaySend(msg) {
+  const r = relay;
+  if (!r || role !== 'client') { toast('Reconnecting… try again in a moment'); return; }
+  if (r.mode === 'ws' && r.ws && r.ws.readyState === 1) r.ws.send(JSON.stringify(msg));
+  else if (r.mode === 'poll') relayPost(msg).then((v) => { if (relay === r && v && v.ver >= (lastView && lastView.ver || 0)) applyView(v); }).catch(() => toast('Could not send, retrying connection…'));
 }
 
 // ---- host ---------------------------------------------------------------
@@ -284,6 +392,7 @@ function onClientData(d) {
   if (d.t === 'state') applyView(d);
 }
 function send(msg) {
+  if (useRelay) return relaySend(msg);
   if (role === 'host') { if (msg.t === 'vote') applyVote(me.id, msg.value); else applyAction(msg); }
   else if (role === 'client' && hostConn && hostConn.open) hostConn.send(msg);
   else toast('Reconnecting… try again in a moment');
@@ -291,6 +400,13 @@ function send(msg) {
 
 // heartbeat both ways + ghost cleanup
 function heartbeat() {
+  if (useRelay) {
+    if (relay && relay.mode === 'ws' && role === 'client') {
+      if (relay.ws.readyState === 1) try { relay.ws.send('{"t":"ping"}'); } catch {}
+      if (now() - lastHostMsg > TIMEOUT) relayLost();
+    }
+    return;
+  }
   if (role === 'client') {
     if (hostConn && hostConn.open) try { hostConn.send({ t: 'ping' }); } catch {}
     if (now() - lastHostMsg > TIMEOUT) hostLost('silent');
@@ -476,7 +592,7 @@ function initJoin() {
 }
 
 function enterRoom(code) {
-  if (typeof Peer === 'undefined') { $('#joinError').textContent = 'Could not load the real-time library. Check your connection and reload.'; return; }
+  if (!useRelay && typeof Peer === 'undefined') { $('#joinError').textContent = 'Could not load the real-time library. Check your connection and reload.'; return; }
   room = code; leaving = false;
   me.joinedAt = Number(sessionStorage.getItem('esb-poker-joined-' + code)) || now();
   sessionStorage.setItem('esb-poker-joined-' + code, me.joinedAt);
@@ -489,12 +605,18 @@ function enterRoom(code) {
   lastView = { hostId: null, story: '', revealed: false, round: 0, autoReveal: false, players: [{ id: me.id, name: me.name, joinedAt: me.joinedAt, voted: false, vote: null }], timer: { duration: 60000, remaining: 60000, running: false, expired: false } };
   render();
   lastView = null;
-  tryClaimHost();
+  if (useRelay) relayConnect(); else tryClaimHost();
   clearInterval(hbTimer); hbTimer = setInterval(heartbeat, HEARTBEAT);
   clearInterval(tickTimer); tickTimer = setInterval(() => { hostTick(); renderTimer(); }, 250);
 }
 
 function sayBye() {
+  if (useRelay && relay) {
+    const m = JSON.stringify({ t: 'bye', pid: me.id });
+    if (relay.mode === 'ws' && relay.ws && relay.ws.readyState === 1) try { relay.ws.send(m); } catch {}
+    else try { navigator.sendBeacon(`${RELAY_URL}/rooms/${room}/send`, new Blob([m], { type: 'text/plain' })); } catch {}
+    return;
+  }
   if (role === 'host') for (const c of conns.keys()) { try { if (c.open) c.send({ t: 'bye' }); } catch {} }
 }
 function leaveRoom() {
@@ -504,7 +626,7 @@ function leaveRoom() {
 window.addEventListener('pagehide', () => { leaving = true; sayBye(); destroyPeer(); });
 
 // debug hook for automated tests
-window.__poker = { get role() { return role; }, get view() { return lastView; }, get me() { return me; } };
+window.__poker = { get transport() { return useRelay ? (relay && relay.mode) : 'peer'; }, get role() { return role; }, get view() { return lastView; }, get me() { return me; } };
 
 buildStatic();
 initJoin();
