@@ -14,6 +14,28 @@ const AVATAR = 'https://api.dicebear.com/10.x/notionists/svg?seed=';
 const TINTS = ['#FFE3EF','#D9FAFF','#FFF9C2','#FFE6D5','#ECEAE4'];
 const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const HEARTBEAT = 2500, TIMEOUT = 9000;
+// ICE: direct (host/STUN) candidates are always tried first; TURN relay is the fallback for
+// networks that block UDP (Zscaler etc.). TURN over TCP/TLS 443 needs credentials:
+// set METERED_TURN_URL to a Metered credentials URL (free account; the API key is safe in front-end code), e.g.
+// 'https://<app>.metered.live/api/v1/turn/credentials?apiKey=<KEY>'. Or list static servers in TURN_SERVERS.
+const STUN_SERVERS = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }];
+const TURN_SERVERS = [];
+const METERED_TURN_URL = '';
+const IS_LOCAL = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
+const FORCE_RELAY = IS_LOCAL && new URLSearchParams(location.search).has('relayonly');   // test hook
+const BLOCKED_MSG = "Can't reach the room server. Your network may be blocking it. Ask IT to allow it, or try another network.";
+let peerOpts = { debug: 0 };
+async function loadIce() {
+  let turn = TURN_SERVERS;
+  if (METERED_TURN_URL) {
+    try {
+      const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 4000);
+      const r = await fetch(METERED_TURN_URL, { signal: ac.signal }); clearTimeout(t);
+      if (r.ok) turn = turn.concat(await r.json());
+    } catch {}
+  }
+  peerOpts = { debug: window.__pdebug || 0, config: { iceServers: STUN_SERVERS.concat(turn), iceTransportPolicy: FORCE_RELAY ? 'relay' : 'all' } };
+}
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -71,6 +93,7 @@ function retryLater(fn, why) {
   attempts++;
   const delay = Math.min(1000 * attempts, 6000) + Math.random() * 400;
   setStatus('warn', why || 'reconnecting…');
+  if (attempts >= 4) { banner(BLOCKED_MSG); setStatus('err', 'can\'t connect'); }
   clearTimeout(retryTimer);
   retryTimer = setTimeout(fn, delay);
 }
@@ -81,7 +104,7 @@ function tryClaimHost() {
   destroyPeer();
   role = 'connecting';
   setStatus('warn', 'connecting…');
-  const p = new Peer(hostPeerId(room), { debug: window.__pdebug||0 });
+  const p = new Peer(hostPeerId(room), peerOpts);
   peer = p;
   p.on('open', () => { if (peer === p) becomeHost(); });
   p.on('connection', (c) => { if (peer === p) onHostConnection(c); });
@@ -102,13 +125,13 @@ function connectAsClient() {
   if (leaving) return;
   destroyPeer();
   role = 'connecting';
-  const p = new Peer({ debug: window.__pdebug||0 });
+  const p = new Peer(peerOpts);
   peer = p;
   p.on('open', () => {
     if (peer !== p) return;
     const c = p.connect(hostPeerId(room), { reliable: true, serialization: 'json' });
     hostConn = c;
-    const t = setTimeout(() => { if (hostConn === c && !c.open) hostLost('timeout'); }, 9000);
+    const t = setTimeout(() => { if (hostConn === c && !c.open) hostLost('timeout'); }, 12000);
     c.on('open', () => {
       if (hostConn !== c) return;
       clearTimeout(t);
@@ -146,6 +169,7 @@ function hostLost(reason) {
   setStatus('warn', 'reconnecting…');
   recovering = true;
   attempts++;
+  if (!wasConnected && attempts >= 4) { banner("Can't connect to the room host. Your network may be blocking peer-to-peer connections. Ask IT to allow it, or try another network."); setStatus('err', 'can\'t connect'); }
   const delay = (wasConnected ? rank * 1500 : Math.min(800 * attempts, 5000)) + Math.random() * 300;
   clearTimeout(retryTimer);
   retryTimer = setTimeout(tryClaimHost, delay);
@@ -489,7 +513,7 @@ function enterRoom(code) {
   lastView = { hostId: null, story: '', revealed: false, round: 0, autoReveal: false, players: [{ id: me.id, name: me.name, joinedAt: me.joinedAt, voted: false, vote: null }], timer: { duration: 60000, remaining: 60000, running: false, expired: false } };
   render();
   lastView = null;
-  tryClaimHost();
+  loadIce().then(tryClaimHost);
   clearInterval(hbTimer); hbTimer = setInterval(heartbeat, HEARTBEAT);
   clearInterval(tickTimer); tickTimer = setInterval(() => { hostTick(); renderTimer(); }, 250);
 }
