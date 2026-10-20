@@ -557,7 +557,7 @@ function render() {
     ul.append(li);
   }
   const votedCount = v.players.filter((p) => p.voted).length;
-  $('#voteHint').textContent = v.revealed ? `round ${v.round} · cards reviewed` : `${votedCount} of ${v.players.length} voted`;
+  $('#voteHint').textContent = v.revealed ? `round ${v.round} · cards revealed` : `${votedCount} of ${v.players.length} voted`;
   $('#revealBtn').hidden = v.revealed;
   $('#revealBtn').disabled = votedCount === 0;
   $('#resetBtn').classList.toggle('pink', v.revealed);
@@ -578,7 +578,7 @@ function render() {
   const deck = $('#deck');
   for (const b of deck.children) { b.setAttribute('aria-pressed', String(b.dataset.v === me.vote)); b.disabled = v.revealed; }
   const myPick = shown(me.vote);
-  $('#deckLabel').textContent = v.revealed ? 'cards reviewed · start a new round to vote again' : (myPick != null ? `you picked ${myPick} · tap again to undo` : 'pick a card');
+  $('#deckLabel').textContent = v.revealed ? 'cards revealed · start a new round to vote again' : (myPick != null ? `you picked ${myPick} · tap again to undo` : 'pick a card');
 
   // timer controls
   for (const b of $('#presets').children) b.setAttribute('aria-pressed', String(Number(b.dataset.s) * 1000 === v.timer.duration));
