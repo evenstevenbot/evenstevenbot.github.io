@@ -499,13 +499,14 @@ function heartbeat() {
 // ---- rendering ---------------------------------------------------------------
 function applyView(v) {
   lastView = v;
-  if (v.round !== me.round) { me.vote = null; me.round = v.round; }
+  if (v.round !== me.round) { me.vote = null; me.round = v.round; clearFlight(); }
   if (v.timer) localEndsAt = now() + v.timer.remaining;
   render();
 }
 
 function render() {
   const v = lastView; if (!v) return;
+  if (v.revealed && flying) clearFlight();
   // story (don't clobber while typing)
   const si = $('#storyInput');
   if (document.activeElement !== si && si.value !== v.story) si.value = v.story;
@@ -523,16 +524,18 @@ function render() {
     const mine = p.id === me.id;
     const spec = avatarSpecFor(p);
     const img = el('img');
-    paintAvatar(img, spec, 72);
+    paintAvatar(img, spec, 79);
     img.loading = 'lazy';
     const av = el('div', 'av');
     av.append(img);
     const card = el('div', 'pcard');
     const vote = shown(p.vote);
+    const didVote = p.voted || (mine && shown(me.vote) != null);
+    const hideMine = mine && flying;
     let state;
     if (v.revealed && vote != null) { card.classList.add('shown'); if (justRevealed) card.classList.add('flip'); card.textContent = vote; if (consensus) card.classList.add('match'); state = `voted ${vote}`; }
-    else if (p.voted || (mine && shown(me.vote) != null)) { card.classList.add('voted'); card.textContent = '✓'; state = 'has voted'; }
-    else { card.textContent = v.revealed ? '–' : ''; state = v.revealed ? 'did not vote' : 'thinking'; }
+    else if (didVote && !hideMine) { card.classList.add('voted'); card.textContent = '✓'; state = 'has voted'; }
+    else { card.textContent = v.revealed ? '–' : ''; state = didVote ? 'has voted' : (v.revealed ? 'did not vote' : 'thinking'); }
     const name = el('div', 'name', p.name + (mine ? ' (you)' : ''));
     if (mine) {
       li.classList.add('me');
@@ -585,6 +588,65 @@ function render() {
 }
 
 let lastExpired = false;
+let flying = false;
+let flyGen = 0;
+let flyerEl = null;
+let landTimer = null;
+function prefersReducedMotion() {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+function clearFlight() {
+  flyGen++;
+  flying = false;
+  clearTimeout(landTimer);
+  landTimer = null;
+  if (!flyerEl) return;
+  const node = flyerEl;
+  flyerEl = null;
+  node.getAnimations().forEach((anim) => anim.cancel());
+  node.remove();
+}
+function flyCardToSeat(source, value) {
+  const seat = document.querySelector('#players li.me .pcard');
+  if (!source || !seat || prefersReducedMotion()) { flying = false; render(); return; }
+  const from = source.getBoundingClientRect();
+  const to = seat.getBoundingClientRect();
+  if (from.width < 1 || to.width < 1) { flying = false; render(); return; }
+  const token = flyGen;
+  const node = document.createElement('div');
+  node.className = 'fly-card';
+  node.textContent = value;
+  node.setAttribute('aria-hidden', 'true');
+  node.style.fontSize = getComputedStyle(source).fontSize;
+  node.style.left = from.left + 'px';
+  node.style.top = from.top + 'px';
+  node.style.width = from.width + 'px';
+  node.style.height = from.height + 'px';
+  document.body.appendChild(node);
+  flyerEl = node;
+  const dx = (to.left + to.width / 2) - (from.left + from.width / 2);
+  const dy = (to.top + to.height / 2) - (from.top + from.height / 2);
+  const scale = Math.min(to.width / from.width, to.height / from.height);
+  const anim = node.animate([
+    { transform: 'translate3d(0,0,0) scale(1)', opacity: 1 },
+    { transform: `translate3d(${dx}px, ${dy}px, 0) scale(${scale})`, opacity: 1, offset: 0.84 },
+    { transform: `translate3d(${dx}px, ${dy}px, 0) scale(${scale})`, opacity: 0 },
+  ], { duration: 520, easing: 'cubic-bezier(.22,.7,.2,1)', fill: 'forwards' });
+  landTimer = setTimeout(() => {
+    if (token !== flyGen) return;
+    flying = false;
+    render();
+  }, 440);
+  anim.onfinish = () => {
+    if (token !== flyGen) return;
+    clearTimeout(landTimer);
+    landTimer = null;
+    if (flyerEl === node) { flyerEl = null; node.remove(); }
+    flying = false;
+    render();
+  };
+  anim.oncancel = () => { if (flyerEl === node) { flyerEl = null; node.remove(); } };
+}
 function renderTimer() {
   const v = lastView; if (!v) return;
   const t = v.timer;
@@ -625,7 +687,7 @@ function previewSpec() {
 }
 function refreshJoinAvatar() {
   const img = $('#joinAvatar');
-  if (img) paintAvatar(img, previewSpec(), 112);
+  if (img) paintAvatar(img, previewSpec(), 123);
 }
 let pickerOptions = [];
 function fillPickerGrid() {
@@ -664,7 +726,7 @@ function openPicker() {
   const dlg = $('#avatarPicker');
   if (!dlg || dlg.open) return;
   refreshJoinAvatar();
-  paintAvatar($('#pickerCurrent'), previewSpec(), 96);
+  paintAvatar($('#pickerCurrent'), previewSpec(), 106);
   shufflePicker();
   if (typeof dlg.showModal === 'function') dlg.showModal();
 }
@@ -691,9 +753,13 @@ function buildStatic() {
     b.setAttribute('aria-pressed', 'false');
     b.addEventListener('click', () => {
       if (!lastView || lastView.revealed) return;
-      me.vote = me.vote === v ? null : v;
+      const next = me.vote === v ? null : v;
+      me.vote = next;
+      if (next == null || prefersReducedMotion()) clearFlight();
+      else { clearFlight(); flying = true; }
       send({ t: 'vote', value: me.vote });
       render();
+      if (flying) flyCardToSeat(b, next);
     });
     deck.append(b);
   }
@@ -705,7 +771,7 @@ function buildStatic() {
     pre.append(b);
   }
   $('#revealBtn').addEventListener('click', () => send({ t: 'act', a: 'reveal' }));
-  $('#resetBtn').addEventListener('click', () => { me.vote = null; send({ t: 'act', a: 'reset' }); });
+  $('#resetBtn').addEventListener('click', () => { me.vote = null; clearFlight(); send({ t: 'act', a: 'reset' }); });
   $('#timerStart').addEventListener('click', () => send({ t: 'act', a: 'timerToggle' }));
   $('#timerReset').addEventListener('click', () => send({ t: 'act', a: 'timerReset' }));
   $('#autoReveal').addEventListener('change', (e) => send({ t: 'act', a: 'autoReveal', v: e.target.checked }));
@@ -784,7 +850,7 @@ function leaveRoom() {
   leaving = true; sayBye();
   setTimeout(() => { destroyPeer(); location.href = location.pathname; }, 150);
 }
-window.addEventListener('pagehide', () => { leaving = true; sayBye(); destroyPeer(); });
+window.addEventListener('pagehide', () => { leaving = true; clearFlight(); sayBye(); destroyPeer(); });
 
 // debug hook for automated tests
 window.__poker = { get role() { return role; }, get view() { return lastView; }, get me() { return me; }, sanitizeAvatar, avatarUrl };
