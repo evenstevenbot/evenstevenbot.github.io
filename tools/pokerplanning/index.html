@@ -35,7 +35,10 @@
   <!-- Join screen -->
   <section class="join" id="joinView" aria-labelledby="joinTitle">
     <div class="join-card">
-      <img class="join-avatar" id="joinAvatar" alt="Your avatar preview" width="112" height="112">
+      <button class="avatar-hit" id="joinAvatarBtn" type="button" aria-haspopup="dialog" aria-label="Change your avatar">
+        <img class="join-avatar" id="joinAvatar" alt="" width="112" height="112">
+        <span class="avatar-edit">change</span>
+      </button>
       <h1 id="joinTitle">planning poker</h1>
       <p class="muted" id="joinSub">Estimate together with Fibonacci cards and a shared timer. No sign-up.</p>
       <form id="joinForm" autocomplete="off">
@@ -121,6 +124,23 @@
   <script>document.querySelectorAll(".site-footer .bmc-btn").forEach(function(a){a.href="https://buymeacoffee.com/widget/page/evensteven";a.rel="noopener";});</script>
 </footer>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
+<dialog class="picker" id="avatarPicker" aria-labelledby="avatarPickerTitle">
+  <div class="picker-card">
+    <h2 id="avatarPickerTitle">choose an avatar</h2>
+    <p class="muted picker-sub">Pick a Notionist. Shuffle for more, or keep the one you have.</p>
+    <div class="picker-current">
+      <img id="pickerCurrent" alt="" width="96" height="96">
+      <div>
+        <p class="picker-now">current</p>
+        <button class="btn ghost" type="button" id="pickerKeep">keep this one</button>
+      </div>
+    </div>
+    <div class="picker-grid" id="pickerGrid" role="listbox" aria-label="Notionists options"></div>
+    <div class="picker-actions">
+      <button class="btn cyan" type="button" id="pickerShuffle" autofocus>shuffle</button>
+    </div>
+  </div>
+</dialog>
 
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js"></script>
 <script src="app.js"></script>

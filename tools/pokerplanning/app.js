@@ -8,9 +8,28 @@
 (() => {
 'use strict';
 const PREFIX = 'evenstevenbot-poker-v1-';
-const DECK = ['0','1','2','3','5','8','13','21','?','☕'];
+const DECK = ['0','1','2','3','5','8','13','21','?'];
 const PRESETS = [[30,'30s'],[60,'1m'],[120,'2m'],[300,'5m']];
-const AVATAR = 'https://api.dicebear.com/10.x/notionists/svg?seed=';
+const AVATAR_BASE = 'https://api.dicebear.com/10.x/notionists/svg';
+const AVATAR_KEY = 'esb-poker-avatar';
+const SEED_MAX = 32;
+const OPT_JSON_MAX = 320;
+const SEED_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+const variantList = (n) => Array.from({ length: n }, (_, i) => 'variant' + String(i + 1).padStart(2, '0'));
+// Allowlisted Notionists features. Values are copied onto the DiceBear URL ourselves;
+// anything else a peer sends is dropped. Optional features omitted from `o` stay off.
+const AVATAR_OPTS = {
+  hair:    { param: 'hairVariant', prob: 'hairProbability', values: ['hat', ...variantList(63)] },
+  glasses: { param: 'glassesVariant', prob: 'glassesProbability', values: variantList(11), optional: true },
+  beard:   { param: 'beardVariant', prob: 'beardProbability', values: variantList(12), optional: true },
+  eyes:    { param: 'eyesVariant', prob: 'eyesProbability', values: variantList(5) },
+  brows:   { param: 'eyebrowsVariant', prob: 'eyebrowsProbability', values: variantList(13) },
+  mouth:   { param: 'mouthVariant', prob: 'mouthProbability', values: variantList(30) },
+  nose:    { param: 'noseVariant', prob: 'noseProbability', values: variantList(20) },
+  clothes: { param: 'clothesVariant', prob: 'clothesProbability', values: variantList(25) },
+  gesture: { param: 'gestureVariant', prob: 'gestureProbability', values: ['hand','handPhone','ok','okLongArm','point','pointLongArm','waveLongArm','waveLongArms','waveOkLongArms','wavePointLongArms'], optional: true },
+};
+const PICKER_COUNT = 12;
 const TINTS = ['#FFE3EF','#D9FAFF','#FFF9C2','#FFE6D5','#ECEAE4'];
 const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const HEARTBEAT = 2500, TIMEOUT = 9000;
@@ -48,7 +67,102 @@ const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls)
 const now = () => Date.now();
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + now().toString(36)).replace(/-/g,'').slice(0,16);
 const hash = (s) => { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) | 0; return Math.abs(h); };
-const avatarUrl = (name) => AVATAR + encodeURIComponent((name || 'guest').trim().toLowerCase());
+function sanitizeSeed(raw) {
+  if (typeof raw !== 'string') return '';
+  const s = raw.trim().toLowerCase().slice(0, SEED_MAX);
+  return SEED_RE.test(s) ? s : '';
+}
+function sanitizeOptions(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const keys = Object.keys(raw);
+  if (keys.length > 12) return null;
+  let json;
+  try { json = JSON.stringify(raw); } catch { return null; }
+  if (json.length > OPT_JSON_MAX) return null;
+  const out = {};
+  for (const key of Object.keys(AVATAR_OPTS)) {
+    if (!Object.prototype.hasOwnProperty.call(raw, key)) continue;
+    const val = raw[key];
+    if (typeof val !== 'string') continue;
+    const v = val.slice(0, 24);
+    if (AVATAR_OPTS[key].values.includes(v)) out[key] = v;
+  }
+  return Object.keys(out).length ? out : null;
+}
+function sanitizeAvatar(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const seed = sanitizeSeed(raw.seed);
+  if (!seed) return null;
+  const o = sanitizeOptions(raw.o);
+  return o ? { seed, o } : { seed };
+}
+function legacySeed(name) {
+  const s = String(name || 'guest').trim().toLowerCase().slice(0, 24);
+  return s || 'guest';
+}
+function avatarUrl(spec) {
+  const params = new URLSearchParams();
+  if (spec && spec.legacy) {
+    params.set('seed', legacySeed(spec.seed));
+    return AVATAR_BASE + '?' + params.toString();
+  }
+  const clean = sanitizeAvatar(spec) || { seed: 'guest' };
+  params.set('seed', clean.seed);
+  if (clean.o) {
+    for (const [key, specOpt] of Object.entries(AVATAR_OPTS)) {
+      const val = clean.o[key];
+      if (val && specOpt.values.includes(val)) {
+        params.set(specOpt.param, val);
+        params.set(specOpt.prob, '100');
+      } else if (specOpt.optional) {
+        params.set(specOpt.prob, '0');
+      }
+    }
+  }
+  return AVATAR_BASE + '?' + params.toString();
+}
+function tintFor(spec) {
+  return TINTS[hash(String((spec && spec.seed) || 'guest').toLowerCase()) % TINTS.length];
+}
+function paintAvatar(img, spec, size) {
+  img.src = avatarUrl(spec);
+  img.alt = '';
+  img.width = size;
+  img.height = size;
+  img.decoding = 'async';
+  img.referrerPolicy = 'no-referrer';
+  img.style.background = tintFor(spec);
+}
+function loadStoredAvatar() {
+  try {
+    const raw = localStorage.getItem(AVATAR_KEY);
+    if (!raw || raw.length > 600) return null;
+    return sanitizeAvatar(JSON.parse(raw));
+  } catch { return null; }
+}
+function storeAvatar(av) {
+  const clean = sanitizeAvatar(av);
+  if (!clean) return null;
+  me.avatar = clean;
+  try { localStorage.setItem(AVATAR_KEY, JSON.stringify(clean)); } catch {}
+  return clean;
+}
+function randInt(n) { return crypto.getRandomValues(new Uint32Array(1))[0] % n; }
+function randomSeed() {
+  const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
+  const bytes = crypto.getRandomValues(new Uint8Array(10));
+  return Array.from(bytes, (n) => alphabet[n % alphabet.length]).join('');
+}
+function randomOptions() {
+  const o = {};
+  const onAt = { glasses: 115, beard: 72, gesture: 56 };
+  for (const [key, spec] of Object.entries(AVATAR_OPTS)) {
+    if (spec.optional && crypto.getRandomValues(new Uint8Array(1))[0] >= (onAt[key] || 80)) continue;
+    o[key] = spec.values[randInt(spec.values.length)];
+  }
+  return o;
+}
+function randomAvatar() { return sanitizeAvatar({ seed: randomSeed(), o: randomOptions() }); }
 const fmt = (ms) => { const s = Math.ceil(Math.max(0, ms) / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
 const cleanCode = (s) => (s || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
 const newCode = () => Array.from(crypto.getRandomValues(new Uint32Array(6)), (n) => CODE_CHARS[n % CODE_CHARS.length]).join('');
@@ -57,8 +171,10 @@ const newCode = () => Array.from(crypto.getRandomValues(new Uint32Array(6)), (n)
 const me = {
   id: sessionStorage.getItem('esb-poker-id') || uid(),
   name: localStorage.getItem('esb-poker-name') || '',
+  avatar: null,
   vote: null, round: 0, joinedAt: 0,
 };
+me.avatar = loadStoredAvatar();
 sessionStorage.setItem('esb-poker-id', me.id);
 
 // ---- network state ----------------------------------------------------------
@@ -200,9 +316,19 @@ function becomeHost() {
     S.timer = { duration: t.duration, remaining: rem, running: t.running && rem > 0, endsAt: now() + rem, expired: t.expired };
   }
   // keep revealed votes of people we knew about, they will re-hello shortly
-  if (prev && prev.revealed) for (const p of prev.players) if (p.id !== prev.hostId) S.players[p.id] = { name: p.name, vote: p.vote, joinedAt: p.joinedAt, ghost: now() };
+  if (prev && prev.revealed) {
+    for (const p of prev.players) {
+      if (p.id === prev.hostId) continue;
+      const row = { name: p.name, vote: p.vote, joinedAt: p.joinedAt, ghost: now() };
+      const av = sanitizeAvatar(p.avatar);
+      if (av) row.avatar = av;
+      S.players[p.id] = row;
+    }
+  }
   if (me.round !== S.round) { me.vote = null; me.round = S.round; }
-  S.players[me.id] = { name: me.name, vote: me.vote, joinedAt: me.joinedAt };
+  const self = { name: me.name, vote: me.vote, joinedAt: me.joinedAt };
+  if (me.avatar) self.avatar = me.avatar;
+  S.players[me.id] = self;
   banner(null);
   setStatus('ok', 'hosting');
   if (migrated) toast('You are now hosting this room');
@@ -232,11 +358,24 @@ function hostHandle(c, d) {
     info.pid = pid;
     const existing = S.players[pid];
     const sameRound = d.round === S.round;
-    S.players[pid] = {
+    let avatar = existing && existing.avatar;
+    if (Object.prototype.hasOwnProperty.call(d, 'avatar')) avatar = sanitizeAvatar(d.avatar) || avatar;
+    const row = {
       name: String(d.name || 'guest').slice(0, 24),
       vote: sameRound && DECK.includes(d.vote) ? d.vote : (existing ? existing.vote : null),
       joinedAt: Number(d.joinedAt) || now(),
     };
+    if (avatar) row.avatar = avatar;
+    S.players[pid] = row;
+    hostBroadcast();
+    return;
+  }
+  // Additive. Older hosts ignore unknown `t` values, so this does not disturb them.
+  if (d.t === 'avatar') {
+    if (!info.pid || !S || !S.players[info.pid]) return;
+    const av = sanitizeAvatar({ seed: d.seed, o: d.o });
+    if (!av) return;
+    S.players[info.pid].avatar = av;
     hostBroadcast();
     return;
   }
@@ -280,7 +419,12 @@ function applyAction(d) {
 function makeView() {
   const t = S.timer;
   const players = Object.entries(S.players)
-    .map(([id, p]) => ({ id, name: p.name, joinedAt: p.joinedAt, voted: p.vote != null, vote: S.revealed ? p.vote : null }))
+    .map(([id, p]) => {
+      const row = { id, name: p.name, joinedAt: p.joinedAt, voted: p.vote != null, vote: S.revealed ? p.vote : null };
+      const av = sanitizeAvatar(p.avatar);
+      if (av) row.avatar = av;
+      return row;
+    })
     .sort((a, b) => a.joinedAt - b.joinedAt);
   return {
     t: 'state', hostId: me.id, story: S.story, revealed: S.revealed, round: S.round, autoReveal: S.autoReveal, players,
@@ -305,7 +449,21 @@ function hostTick() {
 
 // ---- client ---------------------------------------------------------------
 function sendHello() {
-  if (hostConn && hostConn.open) hostConn.send({ t: 'hello', id: me.id, name: me.name, vote: me.vote, round: me.round, joinedAt: me.joinedAt });
+  if (!(hostConn && hostConn.open)) return;
+  const msg = { t: 'hello', id: me.id, name: me.name, vote: me.vote, round: me.round, joinedAt: me.joinedAt };
+  if (me.avatar) msg.avatar = me.avatar;
+  hostConn.send(msg);
+}
+function publishAvatar() {
+  const av = me.avatar;
+  if (!av) return;
+  if (role === 'host') {
+    if (S && S.players[me.id]) { S.players[me.id].avatar = av; hostBroadcast(); }
+    return;
+  }
+  if (role === 'client' && hostConn && hostConn.open) {
+    try { hostConn.send({ t: 'avatar', seed: av.seed, o: av.o }); } catch {}
+  }
 }
 function onClientData(d) {
   lastHostMsg = now();
@@ -356,24 +514,43 @@ function render() {
   const ul = $('#players'); ul.textContent = '';
   const justRevealed = v.revealed && !(render.prev && render.prev.revealed && render.prev.round === v.round);
   render.prev = { revealed: v.revealed, round: v.round };
-  const numeric = v.revealed ? v.players.map((p) => p.vote).filter((x) => x != null && /^\d+$/.test(x)).map(Number) : [];
-  const cast = v.revealed ? v.players.map((p) => p.vote).filter((x) => x != null) : [];
+  const shown = (x) => (typeof x === 'string' && DECK.includes(x) ? x : null);
+  const numeric = v.revealed ? v.players.map((p) => shown(p.vote)).filter((x) => x != null && /^\d+$/.test(x)).map(Number) : [];
+  const cast = v.revealed ? v.players.map((p) => shown(p.vote)).filter((x) => x != null) : [];
   const consensus = v.revealed && cast.length >= 2 && cast.every((x) => x === cast[0]) && /^\d+$/.test(cast[0]);
   for (const p of v.players) {
     const li = el('li', 'player');
+    const mine = p.id === me.id;
+    const spec = avatarSpecFor(p);
+    const img = el('img');
+    paintAvatar(img, spec, 72);
+    img.loading = 'lazy';
     const av = el('div', 'av');
-    const img = el('img'); img.src = avatarUrl(p.name); img.alt = ''; img.width = 72; img.height = 72; img.loading = 'lazy';
-    img.style.background = TINTS[hash(p.name.toLowerCase()) % TINTS.length];
     av.append(img);
     const card = el('div', 'pcard');
+    const vote = shown(p.vote);
     let state;
-    if (v.revealed && p.vote != null) { card.classList.add('shown'); if (justRevealed) card.classList.add('flip'); card.textContent = p.vote; if (consensus) card.classList.add('match'); state = `voted ${p.vote === '☕' ? 'coffee break' : p.vote}`; }
-    else if (p.voted || (p.id === me.id && me.vote != null)) { card.classList.add('voted'); card.textContent = '✓'; state = 'has voted'; }
+    if (v.revealed && vote != null) { card.classList.add('shown'); if (justRevealed) card.classList.add('flip'); card.textContent = vote; if (consensus) card.classList.add('match'); state = `voted ${vote}`; }
+    else if (p.voted || (mine && shown(me.vote) != null)) { card.classList.add('voted'); card.textContent = '✓'; state = 'has voted'; }
     else { card.textContent = v.revealed ? '–' : ''; state = v.revealed ? 'did not vote' : 'thinking'; }
-    const name = el('div', 'name', p.name + (p.id === me.id ? ' (you)' : ''));
-    li.append(card, av, name);
+    const name = el('div', 'name', p.name + (mine ? ' (you)' : ''));
+    if (mine) {
+      li.classList.add('me');
+      const hint = el('span', 'seat-hint', 'change');
+      hint.setAttribute('aria-hidden', 'true');
+      const seat = el('button', 'seat');
+      seat.type = 'button';
+      seat.title = 'Change avatar';
+      seat.setAttribute('aria-haspopup', 'dialog');
+      seat.setAttribute('aria-label', `Change your avatar, ${p.name}`);
+      seat.append(av, name, hint);
+      seat.addEventListener('click', openPicker);
+      li.append(card, seat);
+    } else {
+      li.append(card, av, name);
+    }
     if (p.id === v.hostId) li.append(el('div', 'tag', 'host'));
-    li.setAttribute('aria-label', `${p.name}${p.id === me.id ? ' (you)' : ''}: ${state}`);
+    li.setAttribute('aria-label', `${p.name}${mine ? ' (you)' : ''}: ${state}`);
     ul.append(li);
   }
   const votedCount = v.players.filter((p) => p.voted).length;
@@ -397,7 +574,8 @@ function render() {
   // deck
   const deck = $('#deck');
   for (const b of deck.children) { b.setAttribute('aria-pressed', String(b.dataset.v === me.vote)); b.disabled = v.revealed; }
-  $('#deckLabel').textContent = v.revealed ? 'cards revealed · start a new round to vote again' : (me.vote != null ? `you picked ${me.vote === '☕' ? 'coffee' : me.vote} · tap again to undo` : 'pick a card');
+  const myPick = shown(me.vote);
+  $('#deckLabel').textContent = v.revealed ? 'cards revealed · start a new round to vote again' : (myPick != null ? `you picked ${myPick} · tap again to undo` : 'pick a card');
 
   // timer controls
   for (const b of $('#presets').children) b.setAttribute('aria-pressed', String(Number(b.dataset.s) * 1000 === v.timer.duration));
@@ -433,12 +611,83 @@ function chime() {
   } catch {}
 }
 
+function avatarSpecFor(player) {
+  if (player && player.id === me.id && me.avatar) return me.avatar;
+  const net = player && sanitizeAvatar(player.avatar);
+  if (net) return net;
+  return { seed: legacySeed(player && player.name), legacy: true };
+}
+function previewSpec() {
+  if (me.avatar) return me.avatar;
+  const typed = $('#nameInput') ? $('#nameInput').value : '';
+  const name = (typed || '').trim() || me.name || 'evenstevenbot';
+  return { seed: legacySeed(name), legacy: true };
+}
+function refreshJoinAvatar() {
+  const img = $('#joinAvatar');
+  if (img) paintAvatar(img, previewSpec(), 112);
+}
+let pickerOptions = [];
+function fillPickerGrid() {
+  const grid = $('#pickerGrid');
+  grid.textContent = '';
+  pickerOptions.forEach((opt, i) => {
+    const b = el('button', 'picker-opt');
+    b.type = 'button';
+    b.setAttribute('role', 'option');
+    b.setAttribute('aria-selected', 'false');
+    b.setAttribute('aria-label', `Notionist option ${i + 1}`);
+    const img = el('img');
+    paintAvatar(img, opt, 96);
+    b.append(img);
+    b.addEventListener('click', () => chooseAvatar(opt));
+    grid.append(b);
+  });
+}
+function shufflePicker() {
+  const seen = new Set([avatarUrl(previewSpec())]);
+  const next = [];
+  let guard = 0;
+  while (next.length < PICKER_COUNT && guard < 48) {
+    guard++;
+    const opt = randomAvatar();
+    if (!opt) continue;
+    const url = avatarUrl(opt);
+    if (seen.has(url)) continue;
+    seen.add(url);
+    next.push(opt);
+  }
+  pickerOptions = next;
+  fillPickerGrid();
+}
+function openPicker() {
+  const dlg = $('#avatarPicker');
+  if (!dlg || dlg.open) return;
+  refreshJoinAvatar();
+  paintAvatar($('#pickerCurrent'), previewSpec(), 96);
+  shufflePicker();
+  if (typeof dlg.showModal === 'function') dlg.showModal();
+}
+function closePicker() {
+  const dlg = $('#avatarPicker');
+  if (dlg && dlg.open && typeof dlg.close === 'function') dlg.close();
+}
+function chooseAvatar(opt) {
+  const clean = storeAvatar(opt);
+  if (!clean) return;
+  publishAvatar();
+  refreshJoinAvatar();
+  if (lastView) render();
+  closePicker();
+  toast('Avatar saved');
+}
+
 // ---- UI wiring ----------------------------------------------------------------
 function buildStatic() {
   const deck = $('#deck');
   for (const v of DECK) {
     const b = el('button', 'card', v); b.type = 'button'; b.dataset.v = v;
-    b.setAttribute('aria-label', v === '☕' ? 'coffee break' : v === '?' ? 'not sure' : `${v} points`);
+    b.setAttribute('aria-label', v === '?' ? 'not sure' : `${v} points`);
     b.setAttribute('aria-pressed', 'false');
     b.addEventListener('click', () => {
       if (!lastView || lastView.revealed) return;
@@ -472,6 +721,10 @@ function buildStatic() {
   $('#copyLink2').addEventListener('click', copy);
   $('#shareUrl').addEventListener('focus', (e) => e.target.select());
   $('#leave').addEventListener('click', leaveRoom);
+  $('#pickerKeep').addEventListener('click', closePicker);
+  $('#pickerShuffle').addEventListener('click', shufflePicker);
+  $('#avatarPicker').addEventListener('click', (e) => { if (e.target === $('#avatarPicker')) closePicker(); });
+  $('#joinAvatarBtn').addEventListener('click', openPicker);
 }
 
 function shareUrl() { const u = new URL(location.href); u.search = '?room=' + room; u.hash = ''; return u.toString(); }
@@ -479,9 +732,9 @@ function shareUrl() { const u = new URL(location.href); u.search = '?room=' + ro
 function initJoin() {
   const params = new URLSearchParams(location.search);
   const code = cleanCode(params.get('room'));
-  const ni = $('#nameInput'), prev = $('#joinAvatar');
+  const ni = $('#nameInput');
   ni.value = me.name;
-  const upd = () => { prev.src = avatarUrl(ni.value || 'evenstevenbot'); prev.style.background = TINTS[hash((ni.value || 'evenstevenbot').toLowerCase()) % TINTS.length]; };
+  const upd = () => refreshJoinAvatar();
   let t; ni.addEventListener('input', () => { clearTimeout(t); t = setTimeout(upd, 250); });
   upd();
   if (code) {
@@ -534,7 +787,7 @@ function leaveRoom() {
 window.addEventListener('pagehide', () => { leaving = true; sayBye(); destroyPeer(); });
 
 // debug hook for automated tests
-window.__poker = { get role() { return role; }, get view() { return lastView; }, get me() { return me; } };
+window.__poker = { get role() { return role; }, get view() { return lastView; }, get me() { return me; }, sanitizeAvatar, avatarUrl };
 
 buildStatic();
 initJoin();
