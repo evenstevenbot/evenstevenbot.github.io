@@ -152,6 +152,17 @@ function mouthOf(p) {
 const fatOf = (size) => 1 + (size - 1) * 0.2;
 const radiusOf = (size) => 30 * size;
 const eatRadius = (size) => FOOD_R + 8 + 4 * size;
+// suction: a cone in front of the mouth that captures flakes, then pulls them in over CAP_MS
+const suckRadius = (size) => eatRadius(size) * 1.9;
+const SUCK_COS = Math.cos(32 * Math.PI / 180); // ~64° cone around the facing direction
+const CAP_MS = REDUCED ? 90 : 150;
+const faceOf = (p) => ({ x: Math.cos(p.a) * p.f, y: Math.sin(p.a) });
+function inSuction(p, m, f) {
+  const dx = f.x - m.x, dy = f.y - m.y, d = Math.hypot(dx, dy);
+  if (d < eatRadius(p.size) * 0.55) return true; // touching the lips counts from any side
+  if (d > suckRadius(p.size)) return false;
+  const fc = faceOf(p); return (dx * fc.x + dy * fc.y) / (d || 1) >= SUCK_COS;
+}
 
 function spawnFood() {
   const gold = Math.random() < 0.2;
@@ -208,21 +219,26 @@ function hostTick() {
     H.spawnAcc += rate * dt; while (H.spawnAcc >= 1 && H.foods.length < 160) { H.spawnAcc -= 1; spawnFood(); }
     const mouths = players.map((p) => [p, mouthOf(p)]);
     for (const f of H.foods) {
+      if (f.capd) { // captured: host pulls it into the mouth, then removes it
+        const p = H.players.get(f.cap), age = Date.now() - f.capAt;
+        if (!p || age >= CAP_MS) { f.fade = -1; continue; }
+        const m = mouthOf(p), k = age / CAP_MS; f.x += (m.x - f.x) * k; f.y += (m.y - f.y) * k; continue;
+      }
       f.t += dt; f.dart -= dt;
       if (f.dart <= 0) { f.dart = rand(0.5, 1.6); f.dvx = rand(-1, 1) * rand(60, 140); } // flutter
       f.dvx *= Math.exp(-2.5 * dt);
       let ev = 0, evy = 0;
       for (const [, m] of mouths) { // shy flakes: slip away from mouths that come close
         const dx = f.x - m.x, dy = f.y - m.y, d = Math.hypot(dx, dy);
-        if (d < 95 && d > 0.1) { const k = (1 - d / 95) * 120; ev += dx / d * k; evy += dy / d * k * 0.4; }
+        if (d < 95 && d > 40) { const k = (1 - d / 95) * 120; ev += dx / d * k; evy += dy / d * k * 0.4; }
       }
       f.x += (f.drift + f.dvx + ev + Math.cos(f.t * f.wf + f.ph) * f.wob * f.wf * 0.5) * dt;
       f.y += (f.vy + evy) * dt;
       f.x = clamp(f.x, 15, WORLD_W - 15);
       if (f.y > WORLD_H - SAND_H + 5) f.fade -= dt * 1.5;
       if (f.fade > 0 && f.y > 0) for (const [p, m] of mouths) {
-        if (Math.hypot(f.x - m.x, f.y - m.y) < eatRadius(p.size)) {
-          f.fade = -1; p.score += f.k; p.eats++; p.size = Math.min(MAX_SIZE, p.size * GROW); p.lastScore = Date.now();
+        if (inSuction(p, m, f)) {
+          f.capd = true; f.cap = p.id; f.capAt = Date.now(); p.score += f.k; p.eats++; p.size = Math.min(MAX_SIZE, p.size * GROW); p.lastScore = Date.now();
           H.ev.push([f.id, p.id, Math.round(f.x), Math.round(f.y), f.k]); break;
         }
       }
@@ -239,7 +255,7 @@ function hostTick() {
   H.tick++;
   const snap = { t: 's', ph: H.ph, tl: timeLeft(), cd: H.ph === 'countdown' ? Math.max(0, H.cdEnd - Date.now()) : 0,
     p: players.map((p) => [p.id, Math.round(p.x), Math.round(p.y), +p.size.toFixed(3), p.score, p.f, +p.a.toFixed(2), Math.round(p.vx), Math.round(p.vy)]),
-    fd: H.foods.map((f) => [f.id, Math.round(f.x), Math.round(f.y), f.k, +f.fade.toFixed(2)]), ev: H.ev };
+    fd: H.foods.map((f) => [f.id, Math.round(f.x), Math.round(f.y), f.k, +f.fade.toFixed(2), f.capd ? f.cap + 1 : 0, f.capd ? Date.now() - f.capAt : 0]), ev: H.ev };
   onClientData(snap);
   if (H.tick % SNAP_EVERY === 0) { sendAll(snap); H.ev = []; }
 }
@@ -361,6 +377,7 @@ function onClientData(d) {
       d.at = now(); V.snaps.push(d); if (V.snaps.length > 8) V.snaps.shift();
       V.ph = d.ph; V.tl = d.tl; V.cd = d.cd;
       for (const e of d.ev || []) onEat(e);
+      for (const f of d.fd || []) if (f[5]) onEat([f[0], f[5] - 1, f[1], f[2], f[3]], f[6]);
       break;
     }
     case 'welcome': myId = d.id; joined = true; showGame(); break;
@@ -601,12 +618,16 @@ function interp() {
   return { players, foods };
 }
 const eatenIds = new Set();
-function onEat(e) {
+// A capture (from the host event or a snapshot flake with a captured-by id) starts the pull locally.
+// The flake tracks the live mouth each frame; the gulp + grow fire on arrival.
+function onEat(e, age = 0) {
   const [fid, pid, x, y, k] = e; if (eatenIds.has(fid)) return; eatenIds.add(fid); if (eatenIds.size > 500) eatenIds.clear();
-  V.eats.push({ fid, pid, x, y, k, t: now() });
-  const fv = V.fish.get(pid); if (fv) { fv.snap = now(); fv.vs += 2.6; }
+  const t0 = now() - Math.min(age, CAP_MS);
+  const fv = fishView(pid);
+  V.eats.push({ fid, pid, x, y, k, t: t0, arrive: t0 + CAP_MS, parts: REDUCED ? [] : Array.from({ length: 7 }, () => ({ a: rand(-1.1, 1.1), r: rand(1.6, 3.2), d: rand(0, 0.35), l: rand(8, 16) })) });
+  fv.holdSize = fv.holdUntil > now() ? fv.holdSize : fv.ds; fv.holdUntil = t0 + CAP_MS;
 }
-function fishView(id) { let f = V.fish.get(id); if (!f) { f = { ds: 1, vs: 0, mouth: 0, snap: 0, wig: rand(0, 6) }; V.fish.set(id, f); } return f; }
+function fishView(id) { let f = V.fish.get(id); if (!f) { f = { ds: 1, vs: 0, mouth: 0, snap: -1e9, holdUntil: 0, holdSize: 1, wig: rand(0, 6) }; V.fish.set(id, f); } return f; }
 
 let shake = 0, lastFrame = now(), boardAt = 0, urgent = false;
 function frame() {
@@ -719,7 +740,9 @@ function drawFish(p, foods, t, dt) {
   const m = V.meta.pl[p.id]; if (!m) return;
   const fv = fishView(p.id);
   // bouncy grow spring toward real size
-  fv.vs += (p.size - fv.ds) * 160 * dt; fv.vs *= Math.exp(-9 * dt); fv.ds += fv.vs * dt;
+  if (fv.holdUntil && t >= fv.holdUntil) { fv.holdUntil = 0; fv.snap = t; fv.vs += 2.6; } // gulp, then grow
+  const target = fv.holdUntil ? Math.min(p.size, fv.holdSize) : p.size;
+  fv.vs += (target - fv.ds) * 160 * dt; fv.vs *= Math.exp(-9 * dt); fv.ds += fv.vs * dt;
   if (fv.ds < 0.5) fv.ds = 0.5;
   const ds = fv.ds;
   const { lx, ly, w, h } = localMouth(p, ds);
@@ -728,16 +751,20 @@ function drawFish(p, foods, t, dt) {
   const mx = p.x + (lx * ca - ly * sa) * p.f, my = p.y + (lx * sa + ly * ca);
   // mouth opens only when a flake is right about to touch it
   let near = 1e9; for (const f of foods) { const d = Math.hypot(f.x - mx, f.y - my); if (d < near) near = d; }
-  const er = eatRadius(p.size), openR = er + 28;
-  let want = near < openR ? clamp(1 - (near - er) / (openR - er), 0, 1) : 0;
-  const since = t - fv.snap; if (since < 220) want = since < 90 ? 1 : 0; // snap: wide, then chomp shut
-  fv.mouth += (want - fv.mouth) * Math.min(1, dt * (since < 220 ? 30 : 14));
+  // mouth only starts opening when a flake is really close (just outside the suction zone)
+  const sr = suckRadius(p.size), openR = sr + 14;
+  let want = near < openR ? clamp(1 - (near - sr * 0.6) / (openR - sr * 0.6), 0, 0.75) : 0;
+  const pulling = fv.holdUntil && t < fv.holdUntil;
+  if (pulling) want = 1.15; // gape wide while the flake is being sucked in
+  const since = t - fv.snap; if (since < 200) want = 0; // chomp shut on arrival
+  fv.mouth += (want - fv.mouth) * Math.min(1, dt * (pulling || since < 200 ? 40 : 14));
   const spr = window.FinFish.sprite(m[1], m[2]);
   const speed = Math.hypot(p.vx, p.vy);
   fv.wig += dt * (3 + speed / 40);
   ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.a); ctx.scale(p.f, 1);
-  const squash = since < 220 ? 1 + 0.06 * Math.sin(since / 220 * Math.PI) : 1;
-  ctx.scale(1 + Math.sin(fv.wig) * 0.025, squash);
+  // gulp: quick squash (shorter, taller) then rebound
+  const gk = since < 260 ? since / 260 : 1, gulp = gk < 1 ? Math.sin(gk * Math.PI) * Math.exp(-gk * 2) : 0;
+  ctx.scale((1 + Math.sin(fv.wig) * 0.025) * (1 - 0.12 * gulp), 1 + 0.14 * gulp);
   if (p.id === myId) { ctx.fillStyle = 'rgba(255,230,0,.35)'; ctx.beginPath(); ctx.ellipse(0, 0, w * 0.48, h * 0.45, 0, 0, 7); ctx.fill(); }
   if (spr) ctx.drawImage(spr, -w / 2, -h / 2, w, h);
   else { ctx.fillStyle = (COLORS.find((c) => c.id === m[2]) || COLORS[0]).hex; ctx.beginPath(); ctx.ellipse(0, 0, w * 0.35, h * 0.3, 0, 0, 7); ctx.fill(); }
@@ -753,20 +780,50 @@ function drawFish(p, foods, t, dt) {
 }
 function drawEats(players, t) {
   const byId = new Map(players.map((p) => [p.id, p]));
-  V.eats = V.eats.filter((e) => t - e.t < 900);
+  V.eats = V.eats.filter((e) => t - (e.arrive || e.t) < 900);
   for (const e of V.eats) {
-    const p = byId.get(e.pid); const age = t - e.t;
-    if (p && age < 160) { // suck the flake into the mouth
-      const k = age / 160, x = e.x + ((p._mx || p.x) - e.x) * k * k, y = e.y + ((p._my || p.y) - e.y) * k * k;
-      drawFlake(x, y, e.k, age / 30, 1 - k * 0.8, e.fid, 1, t);
-    }
-    if (p) { // +1 / +2 pop
-      const k = age / 900; ctx.save(); ctx.globalAlpha = 1 - k; ctx.font = `700 ${22 + 6 * (e.k - 1)}px Bungee, Fredoka, sans-serif`; ctx.textAlign = 'center';
+    const p = byId.get(e.pid); const dur = e.arrive - e.t, age = t - e.t;
+    if (p && age < dur) drawSuck(e, p, age / dur, t);
+    const after = t - e.arrive;
+    if (p && after >= 0) { // +1 / +2 pop after the gulp
+      const k = after / 900; if (k >= 1) continue; ctx.save(); ctx.globalAlpha = 1 - k; ctx.font = `700 ${22 + 6 * (e.k - 1)}px Bungee, Fredoka, sans-serif`; ctx.textAlign = 'center';
       ctx.lineWidth = 5; ctx.strokeStyle = '#111'; ctx.fillStyle = e.k === 2 ? '#FFC21A' : '#FF5FA8';
       const y = (p._my || p.y) - 20 - k * 50; ctx.strokeText('+' + e.k, p._mx || p.x, y); ctx.fillText('+' + e.k, p._mx || p.x, y); ctx.restore();
-      if (age < 200) { ctx.save(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; const r = 8 + age / 8; for (let i = 0; i < 6; i++) { const a = i * Math.PI / 3; ctx.beginPath(); ctx.moveTo((p._mx || p.x) + Math.cos(a) * r, (p._my || p.y) + Math.sin(a) * r); ctx.lineTo((p._mx || p.x) + Math.cos(a) * (r + 7), (p._my || p.y) + Math.sin(a) * (r + 7)); ctx.stroke(); } ctx.restore(); }
+      if (e.k === 2 && after < 400) drawSparkles(p._mx || p.x, p._my || p.y, after, t);
+      if (after < 200) { ctx.save(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; const r = 8 + after / 8; for (let i = 0; i < 6; i++) { const a = i * Math.PI / 3; ctx.beginPath(); ctx.moveTo((p._mx || p.x) + Math.cos(a) * r, (p._my || p.y) + Math.sin(a) * r); ctx.lineTo((p._mx || p.x) + Math.cos(a) * (r + 7), (p._my || p.y) + Math.sin(a) * (r + 7)); ctx.stroke(); } ctx.restore(); }
     }
   }
+}
+// Captured flake: curves into the live mouth, accelerating (ease-in), stretched along its path and shrinking,
+// with water streaks / bubbles converging on the mouth.
+function drawSuck(e, p, k, t) {
+  const mx = p._mx || p.x, my = p._my || p.y;
+  const ease = k * k * k;
+  const dx = mx - e.x, dy = my - e.y, d = Math.hypot(dx, dy) || 1;
+  const bend = Math.sin(k * Math.PI) * Math.min(18, d * 0.35) * (e.fid % 2 ? 1 : -1); // slight curve
+  const x = e.x + dx * ease - dy / d * bend, y = e.y + dy * ease + dx / d * bend;
+  const ang = Math.atan2(my - y, mx - x), stretch = 1 + 1.4 * k, shrink = 1 - 0.75 * k;
+  if (!REDUCED) for (const s of e.parts) { // streaks and bubbles rushing in
+    const q = clamp((k - s.d) / (1 - s.d), 0, 1); if (q <= 0 || q >= 1) continue;
+    const a = ang + Math.PI + s.a, rr = (1 - q * q) * (28 + s.l * 2) * p.size;
+    const px = mx + Math.cos(a) * rr, py = my + Math.sin(a) * rr;
+    ctx.save(); ctx.globalAlpha = 0.9 * (1 - q * 0.5); ctx.strokeStyle = '#fff'; ctx.lineCap = 'round'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px + Math.cos(a) * s.l * (0.5 + q), py + Math.sin(a) * s.l * (0.5 + q)); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.beginPath(); ctx.arc(px, py, s.r, 0, 7); ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+  ctx.save(); ctx.translate(x, y); ctx.rotate(ang); ctx.scale(stretch * shrink, shrink / Math.sqrt(stretch));
+  flakePath(FOOD_R * (e.k === 2 ? 1.15 : 1), e.fid);
+  ctx.fillStyle = e.k === 2 ? '#FFC21A' : '#FF5FA8'; ctx.fill(); ctx.lineWidth = 2.5 / shrink; ctx.strokeStyle = '#111'; ctx.stroke();
+  ctx.restore();
+}
+function drawSparkles(x, y, after, t) {
+  const k = after / 400; ctx.save(); ctx.globalAlpha = 1 - k; ctx.fillStyle = '#FFE600'; ctx.strokeStyle = '#111'; ctx.lineWidth = 1.5;
+  for (let i = 0; i < 5; i++) {
+    const a = i / 5 * Math.PI * 2 + t / 300, r = 14 + k * 30, s = 6 * (1 - k * 0.6), cx = x + Math.cos(a) * r, cy = y + Math.sin(a) * r;
+    ctx.beginPath(); ctx.moveTo(cx, cy - s); ctx.lineTo(cx + s * 0.3, cy); ctx.lineTo(cx, cy + s); ctx.lineTo(cx - s * 0.3, cy); ctx.closePath(); ctx.fill(); ctx.stroke();
+  }
+  ctx.restore();
 }
 function drawName(p) {
   const m = V.meta.pl[p.id]; if (!m) return;
@@ -847,5 +904,5 @@ function showPickWhenConnected() {
 }
 $('#joinForm').addEventListener('submit', showPickWhenConnected);
 requestAnimationFrame(frame);
-if (QS.has('test')) window.__finops = { V, H, cam, w2s: (x, y) => ({ x: (x - cam.x) * cam.z + VW / 2, y: (y - cam.y) * cam.z + VH / 2 }), get role() { return role; }, get myId() { return myId; }, get room() { return room; }, hostSet, hostStart };
+if (QS.has('test')) window.__finops = { V, H, cam, w2s: (x, y) => ({ x: (x - cam.x) * cam.z + VW / 2, y: (y - cam.y) * cam.z + VH / 2 }), get role() { return role; }, get myId() { return myId; }, get room() { return room; }, hostSet, hostStart, mouthOf, suckRadius, CAP_MS };
 })();
