@@ -103,7 +103,7 @@ const H = { // host-only state
   ev: [], tick: 0, spawnAcc: 0, metaVer: 0, result: null, timer: null, lastT: 0, pill: null, nextPill: 0,
 };
 // client view state
-const V = { meta: { pl: {}, set: { ...DEFAULTS }, ph: 'lobby', host: 0, n: 0 }, snaps: [], fish: new Map(), eats: [], fx: [], souls: [], ph: 'lobby', tl: 0, cd: 0, result: null,
+const V = { meta: { pl: {}, set: { ...DEFAULTS }, ph: 'lobby', host: 0, n: 0 }, snaps: [], fish: new Map(), eats: [], fx: [], splats: [], ph: 'lobby', tl: 0, cd: 0, result: null,
   seq: -1, lastAt: 0, gapM: 66, gapD: 8, idelay: 100, rtt: 0, pill: null };
 
 /* ---------------- host: sim ---------------- */
@@ -160,13 +160,17 @@ function timeLeft() {
 function mouthOf(p) {
   const s = speciesOf(p.sp);
   const w = FISH_LEN * p.size, h = FISH_HT * p.size * fatOf(p.size);
-  const lx = ((s.mouth[0] + 14) / 268 - 0.5) * w, ly = ((s.mouth[1] + 14) / 208 - 0.5) * h;
+  let lx = ((s.mouth[0] + 14) / 268 - 0.5) * w, ly = ((s.mouth[1] + 14) / 208 - 0.5) * h;
+  if (p.pw) ({ lx, ly } = sharkMouth(FISH_LEN * p.size, FISH_HT * p.size));
   const ca = Math.cos(p.a), sa = Math.sin(p.a);
   const rx = lx * ca - ly * sa, ry = lx * sa + ly * ca;
   return { x: p.x + rx * p.f, y: p.y + ry };
 }
 const fatOf = (size) => 1 + (size - 1) * 0.2;
 const radiusOf = (size) => 30 * size;
+const SHARK_X = 3; // great white = 3x the fish's normal size
+// shark snout: front of the body, a touch below centre (fish-local, before flip/tilt)
+const sharkMouth = (w, h) => ({ lx: 0.43 * w, ly: 0.1 * h * 0.6 });
 const eatRadius = (size) => FOOD_R + 8 + 4 * size;
 // suction: a cone in front of the mouth that captures flakes, then pulls them in over CAP_MS
 const suckRadius = (size) => eatRadius(size) * 1.9;
@@ -218,7 +222,7 @@ function spawnPill() {
     wob: rand(30, 60), wf: rand(1.2, 2.4), ph: rand(0, 6.28), dart: rand(0.4, 1.2), dvx: 0, fade: 1, t: 0 };
 }
 const pillGap = () => rand(PILL_GAP[0], PILL_GAP[1]);
-function powerUp(p) { p.pw = Date.now() + PW_MS; p.size = p.base * 2; fxAll({ k: 'pill', pid: p.id }); }
+function powerUp(p) { p.pw = Date.now() + PW_MS; p.size = p.base * SHARK_X; fxAll({ k: 'pill', pid: p.id }); }
 function powerDown(p, why) { if (!p.pw) return; p.pw = 0; p.size = p.base; fxAll({ k: 'unpw', pid: p.id, why }); }
 function spawnFood() {
   const gold = Math.random() < 0.2;
@@ -298,7 +302,7 @@ function hostTick() {
     for (const p of players) {
       if (!p.pw || p.out) continue;
       if (nowMs >= p.pw) { powerDown(p, 'time'); continue; }
-      const m = mouthOf(p), fc = faceOf(p), bx = m.x + fc.x * 6 * p.base, by = m.y + fc.y * 6 * p.base;
+      const m = mouthOf(p), fc = faceOf(p), bx = m.x + fc.x * 10 * p.base, by = m.y + fc.y * 10 * p.base;
       for (const q of players) {
         if (q === p || q.out || q.pw) continue; // a powered fish can't be eaten
         const d = Math.hypot(q.x - bx, (q.y - by) * 1.25);
@@ -313,7 +317,7 @@ function hostTick() {
     // win checks. If eating leaves only one fish swimming, the round ends early; winner = highest score
     // (eaten fish keep their locked-in score).
     const swimming = players.filter((p) => !p.out);
-    if (all.length >= 2 && swimming.length <= 1 && all.some((p) => p.out)) { if (!H.endAt) H.endAt = nowMs + 2600; if (nowMs >= H.endAt) hostEnd(); } // let the soul float away first
+    if (all.length >= 2 && swimming.length <= 1 && all.some((p) => p.out)) { if (!H.endAt) H.endAt = nowMs + 1800; if (nowMs >= H.endAt) hostEnd(); } // let the splat play out first
     else if (H.set.mode === 'timer' && timeLeft() <= 0) hostEnd();
     else if (H.set.mode === 'goal' && swimming.some((p) => p.score >= H.set.goal)) hostEnd();
   }
@@ -577,11 +581,11 @@ function showEnd() {
     const r = res[i]; if (!r) continue; const m = pl[r[0]]; if (!m) continue;
     const col = el('div', 'pod pod' + (i + 1));
     const img = el('img', 'pod-fish'); img.src = window.FinFish.urlFor(m[1], m[2]); img.alt = '';
-    col.append(img, el('div', 'pod-name', (r[2] ? '👻 ' : '') + m[0] + (+r[0] === myId ? ' (you)' : '')), el('div', 'pod-pts', r[1] + ' pts'), el('div', 'pod-block', String(i + 1)));
+    col.append(img, el('div', 'pod-name', (r[2] ? '💥 ' : '') + m[0] + (+r[0] === myId ? ' (you)' : '')), el('div', 'pod-pts', r[1] + ' pts'), el('div', 'pod-block', String(i + 1)));
     pod.append(col);
   }
   const ol = $('#finalList'); ol.textContent = '';
-  res.forEach((r, i) => { const m = pl[r[0]]; if (!m) return; const li = el('li', +r[0] === myId ? 'me' : ''); li.append(el('b', '', '#' + (i + 1)), el('span', '', (r[2] ? '👻 ' : '') + m[0] + (r[2] ? ' (eaten)' : '')), el('em', '', r[1] + ' pts')); ol.append(li); });
+  res.forEach((r, i) => { const m = pl[r[0]]; if (!m) return; const li = el('li', +r[0] === myId ? 'me' : ''); li.append(el('b', '', '#' + (i + 1)), el('span', '', (r[2] ? '💥 ' : '') + m[0] + (r[2] ? ' (chomped)' : '')), el('em', '', r[1] + ' pts')); ol.append(li); });
   const host = role === 'host';
   $('#againBtn').hidden = !host; $('#lobbyBtn').hidden = !host;
   $('#endWait').textContent = host ? '' : 'Waiting for the host to start the next round…';
@@ -635,7 +639,7 @@ function renderBoard(players) {
     r.style.transform = `translateY(${i * rowH}px)`; r.style.setProperty('--c', col);
     r.querySelector('.rk').textContent = i + 1;
     const img = r.querySelector('img'), src = window.FinFish.urlFor(m[1], m[2]); if (img.getAttribute('src') !== src) img.src = src;
-    r.querySelector('.nm').textContent = (p.out ? '👻 ' : p.pw ? '💊 ' : '') + m[0] + (p.id === myId ? ' · YOU' : '');
+    r.querySelector('.nm').textContent = (p.out ? '💥 ' : p.pw ? '🦈 ' : '') + m[0] + (p.id === myId ? ' · YOU' : '');
     r.querySelector('.bar i').style.width = Math.min(100, p.score / denom * 100) + '%';
     const pt = r.querySelector('.pt'); if (pt.textContent !== String(p.score)) { pt.textContent = p.score; pt.classList.remove('bump'); void pt.offsetWidth; pt.classList.add('bump'); }
   });
@@ -771,14 +775,14 @@ function predStep(dt) {
   const t = now(); pred.hist.push({ t, x: pred.x, y: pred.y, vx: pred.vx, vy: pred.vy });
   while (pred.hist.length && t - pred.hist[0].t > 1000) pred.hist.shift();
 }
-/* one-off effects from the host: pill swallowed, chomp + soul, power-up over */
+/* one-off effects from the host: pill swallowed, chomp + splat, power-up over */
 function onFx(d) {
   const t = now(), pl = V.meta.pl || {};
-  if (d.k === 'pill') { const fv = fishView(d.pid); fv.pwAt = t; fv.vs += 4; if (d.pid === myId) toast('MAGIC PILL! 2x size + metal jaws: eat a fish!'); else if (pl[d.pid]) toast(pl[d.pid][0] + ' got the magic pill!'); }
-  else if (d.k === 'unpw') { const fv = fishView(d.pid); fv.unAt = t; fv.vs -= 2; if (d.pid === myId && d.why === 'time') toast('Power-up wore off'); }
+  if (d.k === 'pill') { const fv = fishView(d.pid); fv.pwAt = t; fv.vs += 4; if (d.pid === myId) toast('MAGIC SHARK PILL! You\'re a great white 🦈 chomp ONE fish in 15s!'); else if (pl[d.pid]) toast(pl[d.pid][0] + ' got the magic shark pill! 🦈'); }
+  else if (d.k === 'unpw') { const fv = fishView(d.pid); fv.unAt = t; if (d.why === 'ate' && !REDUCED) { fv.holdShark = t + 650; fv.sharkSize = fv.ds; } else fv.vs -= 2; if (d.pid === myId && d.why === 'time') toast('Power-up wore off'); }
   else if (d.k === 'chomp') {
     const m = pl[d.b] || [];
-    V.souls.push({ x: d.x, y: d.y, f: d.f, s: d.s, sp: m[1], c: m[2], t, by: d.a });
+    V.splats.push(mkSplat(d.x, d.y, d.s, t));
     const fa = fishView(d.a); fa.chompAt = t; fa.snap = t;
     if (d.b === myId) { pred.ok = false; releaseAll(); }
     else if (d.a === myId) toast('CHOMP! You ate ' + (m[0] || 'a fish') + '!');
@@ -836,9 +840,10 @@ function frame() {
   // fish (smaller first so big fish sit on top), names after
   const sorted = players.slice().sort((a, b) => a.size - b.size);
   const bait = pill ? foods.concat([{ x: pill.x, y: pill.y }]) : foods;
-  for (const p of sorted) drawFish(p, bait, t, dt);
+  sharkPrey = players.filter((q) => !(q.pw > 0));
+  for (const p of sorted) { const fv = fishView(p.id); fv.wx = p.x + p.f * 0.43 * FISH_LEN * fv.ds; fv.wy = p.y; drawFish(p, bait, t, dt); }
   drawEats(players, t);
-  drawSouls(t);
+  drawSplats(t);
   for (const p of sorted) drawName(p);
   if (urgent) { ctx.setTransform(DPR, 0, 0, DPR, 0, 0); const a = 0.10 + 0.08 * Math.sin(t / 160); ctx.fillStyle = `rgba(255,46,136,${a})`; ctx.fillRect(0, 0, VW, VH); }
   // HUD text
@@ -911,6 +916,7 @@ function drawFood(foods, t) {
 function localMouth(p, ds) {
   const s = speciesOf((V.meta.pl[p.id] || [])[1]);
   const w = FISH_LEN * ds, h = FISH_HT * ds * fatOf(ds);
+  if (p.pw > 0) { const sm = sharkMouth(FISH_LEN * ds, FISH_HT * ds); return { ...sm, w, h }; }
   return { lx: ((s.mouth[0] + 14) / 268 - 0.5) * w, ly: ((s.mouth[1] + 14) / 208 - 0.5) * h, w, h };
 }
 function drawFish(p, foods, t, dt) {
@@ -918,7 +924,8 @@ function drawFish(p, foods, t, dt) {
   const fv = fishView(p.id);
   // bouncy grow spring toward real size
   if (fv.holdUntil && t >= fv.holdUntil) { fv.holdUntil = 0; fv.snap = t; fv.vs += 2.6; } // gulp, then grow
-  const target = fv.holdUntil ? Math.min(p.size, fv.holdSize) : p.size;
+  const sharkHeld = fv.holdShark && t < fv.holdShark; // stay a shark for a beat after the chomp, then morph back
+  const target = sharkHeld ? fv.sharkSize : fv.holdUntil ? Math.min(p.size, fv.holdSize) : p.size;
   fv.vs += (target - fv.ds) * 160 * dt; fv.vs *= Math.exp(-9 * dt); fv.ds += fv.vs * dt;
   if (fv.ds < 0.5) fv.ds = 0.5;
   const ds = fv.ds;
@@ -943,12 +950,19 @@ function drawFish(p, foods, t, dt) {
   const gk = since < 260 ? since / 260 : 1, gulp = gk < 1 ? Math.sin(gk * Math.PI) * Math.exp(-gk * 2) : 0;
   ctx.scale((1 + Math.sin(fv.wig) * 0.025) * (1 - 0.12 * gulp), 1 + 0.14 * gulp);
   const pw = p.pw > 0, warn = pw && p.pw < PW_WARN, blinkOff = warn && Math.floor(t / (p.pw < 1200 ? 90 : 160)) % 2 === 0;
-  if (pw && !blinkOff) drawAura(w, h, t);
-  if (p.id === myId) { ctx.fillStyle = 'rgba(255,230,0,.35)'; ctx.beginPath(); ctx.ellipse(0, 0, w * 0.48, h * 0.45, 0, 0, 7); ctx.fill(); }
-  if (spr) ctx.drawImage(spr, -w / 2, -h / 2, w, h);
-  else { ctx.fillStyle = (COLORS.find((c) => c.id === m[2]) || COLORS[0]).hex; ctx.beginPath(); ctx.ellipse(0, 0, w * 0.35, h * 0.3, 0, 0, 7); ctx.fill(); }
-  if (pw && !(warn && blinkOff)) { ctx.save(); ctx.translate(lx - 4 * ds, ly); drawJaws(ds, t, fv); ctx.restore(); }
-  if (fv.mouth > 0.04 && !pw) {
+  // shark morph 0 = fish, 1 = great white (smooth in and out; blinks back to the fish in the last 3 s)
+  const skT = (pw && !blinkOff) || sharkHeld ? 1 : 0; fv.sk = fv.sk == null ? skT : fv.sk + (skT - fv.sk) * (REDUCED ? 1 : Math.min(1, dt * (warn ? 30 : 6)));
+  const sk = fv.sk, hex = (COLORS.find((c) => c.id === m[2]) || COLORS[0]).hex;
+  if (pw && !blinkOff) drawAura(w, h * 0.7, t);
+  if (p.id === myId) { ctx.fillStyle = 'rgba(255,230,0,.35)'; ctx.beginPath(); ctx.ellipse(0, 0, w * 0.48, h * (0.45 - 0.15 * sk), 0, 0, 7); ctx.fill(); }
+  if (sk < 0.99) {
+    ctx.save(); ctx.globalAlpha = 1 - sk; const fs = 1 - 0.5 * sk; // the fish shrinks into the shark
+    if (spr) ctx.drawImage(spr, -w * fs / 2, -h * fs / 2, w * fs, h * fs);
+    else { ctx.fillStyle = hex; ctx.beginPath(); ctx.ellipse(0, 0, w * 0.35 * fs, h * 0.3 * fs, 0, 0, 7); ctx.fill(); }
+    ctx.restore();
+  }
+  if (sk > 0.01) { ctx.save(); ctx.globalAlpha = sk; const ss = 0.55 + 0.45 * sk; ctx.scale(ss, ss); drawShark(FISH_LEN * ds, FISH_HT * ds, ds, t, fv, hex); ctx.restore(); }
+  if (fv.mouth > 0.04 && sk < 0.5) {
     const o = fv.mouth, sc = ds;
     ctx.translate(lx - 3 * sc, ly);
     ctx.fillStyle = '#111'; ctx.beginPath(); ctx.ellipse(0, 0, (4 + 6 * o) * sc, (2 + 9 * o) * sc, 0, 0, 7); ctx.fill();
@@ -977,22 +991,59 @@ function drawAura(w, h, t) {
     ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.moveTo(x, y - s); ctx.lineTo(x + s * 0.3, y); ctx.lineTo(x, y + s); ctx.lineTo(x - s * 0.3, y); ctx.closePath(); ctx.fill();
   }
 }
-// steel jaws at the mouth with a moving glint; they snap shut on a chomp
-function drawJaws(ds, t, fv) {
-  const since = t - (fv.chompAt || -1e9), snap = since < 260 ? 1 - since / 260 : 0;
-  const open = 0.55 + (REDUCED ? 0 : 0.25 * Math.sin(t / 160)) - 0.55 * snap;
-  const L = 26 * ds, H = 16 * ds * Math.max(0.05, open), n = 4;
-  const g = ctx.createLinearGradient(-L, -H, L * 0.4, H);
-  g.addColorStop(0, '#5d6670'); g.addColorStop(0.45, '#e9eef3'); g.addColorStop(0.55, '#b9c2cb'); g.addColorStop(1, '#4a525b');
-  for (const sgn of [-1, 1]) {
-    ctx.beginPath(); ctx.moveTo(-L, sgn * 2 * ds); ctx.lineTo(L * 0.25, sgn * (H + 3 * ds)); ctx.lineTo(L * 0.25, sgn * 2 * ds);
-    for (let i = 0; i <= n; i++) { const x = L * 0.25 - (i / n) * L * 1.25; ctx.lineTo(x, i % 2 ? sgn * 2 * ds : sgn * (2 * ds - 7 * ds)); }
-    ctx.closePath(); ctx.fillStyle = g; ctx.fill(); ctx.lineWidth = 2.5 * ds * 0.8; ctx.strokeStyle = '#111'; ctx.stroke();
-  }
-  // glint sweeping across the steel
-  const gx = REDUCED ? -L * 0.3 : -L + ((t / 700) % 1) * L * 1.4;
-  ctx.save(); ctx.globalAlpha = 0.9; ctx.fillStyle = '#fff'; const s = 5 * ds;
-  ctx.beginPath(); ctx.moveTo(gx, -H - s); ctx.lineTo(gx + s * 0.35, -H); ctx.lineTo(gx, -H + s); ctx.lineTo(gx - s * 0.35, -H); ctx.closePath(); ctx.fill(); ctx.restore();
+// cartoon great white (fish-local, facing +x). w/h = fish box at this size; outline in the player's colour.
+let sharkPrey = [];
+function drawShark(w, h, ds, t, fv, hex) {
+  const L = w, H = h * 0.6, lw = Math.max(3, 2.2 * ds);
+  const since = t - (fv.chompAt || -1e9);
+  // jaws: idle menace, gape when prey is close, SNAP shut on the chomp, then relax
+  let near = 1e9; const me = fv.wx != null ? fv : null;
+  if (me) for (const q of sharkPrey) { const d = Math.hypot(q.x - me.wx, q.y - me.wy); if (d < near && d > 1) near = d; }
+  let want = 0.22 + (REDUCED ? 0 : 0.08 * Math.sin(t / 170));
+  if (near < L * 1.1) want = 0.9;
+  if (since < 90) want = 1; else if (since < 360) want = 0;
+  fv.jaw = fv.jaw == null ? want : fv.jaw + (want - fv.jaw) * Math.min(1, (since < 360 ? 0.5 : 0.15) * 60 / 60);
+  const jo = clamp(fv.jaw, 0, 1);
+  const tw = REDUCED ? 0 : Math.sin(fv.wig * 1.3) * 0.12; // tail swish
+  ctx.lineJoin = 'round'; ctx.lineWidth = lw; ctx.strokeStyle = '#111';
+  // tail (crescent)
+  ctx.save(); ctx.translate(-0.42 * L, 0); ctx.rotate(tw);
+  ctx.beginPath(); ctx.moveTo(0, -0.08 * H); ctx.quadraticCurveTo(-0.08 * L, -0.35 * H, -0.2 * L, -0.62 * H); ctx.quadraticCurveTo(-0.12 * L, -0.15 * H, -0.12 * L, 0);
+  ctx.quadraticCurveTo(-0.12 * L, 0.15 * H, -0.17 * L, 0.45 * H); ctx.quadraticCurveTo(-0.06 * L, 0.25 * H, 0, 0.08 * H); ctx.closePath();
+  ctx.fillStyle = '#7d8c9b'; ctx.fill(); ctx.stroke(); ctx.restore();
+  // dorsal fin
+  ctx.beginPath(); ctx.moveTo(-0.12 * L, -0.4 * H); ctx.quadraticCurveTo(-0.02 * L, -0.75 * H, -0.04 * L, -0.98 * H); ctx.quadraticCurveTo(0.06 * L, -0.6 * H, 0.12 * L, -0.42 * H); ctx.closePath();
+  ctx.fillStyle = '#7d8c9b'; ctx.fill(); ctx.strokeStyle = hex; ctx.lineWidth = lw * 2.2; ctx.stroke(); ctx.strokeStyle = '#111'; ctx.lineWidth = lw; ctx.stroke();
+  // lower jaw (hinged near the eye, swings down)
+  const hx = 0.2 * L, hy = 0.12 * H;
+  ctx.save(); ctx.translate(hx, hy); ctx.rotate(jo * 0.55);
+  ctx.beginPath(); ctx.moveTo(-0.02 * L, 0); ctx.lineTo(0.22 * L, 0.02 * H); ctx.quadraticCurveTo(0.2 * L, 0.3 * H, 0.0, 0.32 * H); ctx.quadraticCurveTo(-0.06 * L, 0.2 * H, -0.02 * L, 0); ctx.closePath();
+  ctx.fillStyle = '#f4f6f8'; ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#fff'; for (let i = 0; i < 6; i++) { const x = 0.19 * L - i * 0.035 * L; ctx.beginPath(); ctx.moveTo(x, 0.02 * H); ctx.lineTo(x - 0.017 * L, -0.11 * H); ctx.lineTo(x - 0.034 * L, 0.02 * H); ctx.closePath(); ctx.fill(); ctx.lineWidth = lw * 0.5; ctx.stroke(); }
+  ctx.restore(); ctx.lineWidth = lw;
+  // mouth cavity
+  if (jo > 0.05) { ctx.fillStyle = '#5a0b1e'; ctx.beginPath(); ctx.moveTo(hx, hy); ctx.lineTo(hx + 0.23 * L * Math.cos(jo * 0.55), hy + 0.23 * L * Math.sin(jo * 0.55)); ctx.lineTo(0.47 * L, 0.06 * H); ctx.closePath(); ctx.fill(); }
+  // body: grey top, white belly
+  ctx.beginPath(); ctx.moveTo(0.5 * L, 0.02 * H);
+  ctx.bezierCurveTo(0.45 * L, -0.38 * H, 0.15 * L, -0.5 * H, -0.12 * L, -0.42 * H); ctx.bezierCurveTo(-0.3 * L, -0.34 * H, -0.4 * L, -0.15 * H, -0.44 * L, -0.06 * H);
+  ctx.lineTo(-0.44 * L, 0.06 * H); ctx.bezierCurveTo(-0.3 * L, 0.3 * H, -0.05 * L, 0.42 * H, hx, hy + 0.06 * H); ctx.lineTo(0.47 * L, 0.06 * H); ctx.closePath();
+  const g = ctx.createLinearGradient(0, -0.45 * H, 0, 0.4 * H); g.addColorStop(0, '#6f7f8f'); g.addColorStop(0.5, '#9aa8b5'); g.addColorStop(0.56, '#f4f6f8'); g.addColorStop(1, '#ffffff');
+  ctx.fillStyle = g; ctx.fill(); ctx.strokeStyle = hex; ctx.lineWidth = lw * 2.2; ctx.stroke(); ctx.strokeStyle = '#111'; ctx.lineWidth = lw; ctx.stroke();
+  // upper teeth
+  ctx.fillStyle = '#fff'; for (let i = 0; i < 7; i++) { const x = 0.46 * L - i * 0.037 * L, y = 0.06 * H - (0.46 * L - x) * 0.18 * H / L * 0.3 + (jo > 0.05 ? 0 : 0);
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - 0.018 * L, y + (0.1 + 0.05 * jo) * H); ctx.lineTo(x - 0.036 * L, y); ctx.closePath(); ctx.fill(); ctx.lineWidth = lw * 0.5; ctx.stroke(); }
+  ctx.lineWidth = lw;
+  // pectoral fin
+  ctx.beginPath(); ctx.moveTo(0.02 * L, 0.12 * H); ctx.quadraticCurveTo(-0.08 * L, 0.45 * H, -0.16 * L, 0.6 * H); ctx.quadraticCurveTo(-0.06 * L, 0.3 * H, 0.1 * L, 0.14 * H); ctx.closePath();
+  ctx.fillStyle = '#7d8c9b'; ctx.fill(); ctx.stroke();
+  // gills
+  ctx.lineWidth = lw * 0.8; for (let i = 0; i < 3; i++) { const x = 0.12 * L - i * 0.035 * L; ctx.beginPath(); ctx.moveTo(x, -0.18 * H); ctx.quadraticCurveTo(x - 0.025 * L, 0, x, 0.14 * H); ctx.stroke(); }
+  // mean eye + angry brow
+  const ex = 0.3 * L, ey = -0.14 * H, er = Math.max(4, 0.045 * L * 0.6);
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(ex, ey, er, 0, 7); ctx.fill(); ctx.lineWidth = lw * 0.7; ctx.stroke();
+  ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(ex + er * 0.25, ey + er * 0.1, er * 0.55, 0, 7); ctx.fill();
+  ctx.lineWidth = lw * 1.3; ctx.beginPath(); ctx.moveTo(ex - er * 1.6, ey - er * 1.7); ctx.lineTo(ex + er * 1.5, ey - er * 0.6); ctx.stroke();
+  ctx.lineWidth = lw;
 }
 // glowing capsule pill
 function drawPill(x, y, t, alpha, scale) {
@@ -1011,34 +1062,43 @@ function drawPill(x, y, t, alpha, scale) {
     const cx = x + Math.cos(a) * rr, cy = y + Math.sin(a) * rr; ctx.fillStyle = '#FFE600'; ctx.strokeStyle = '#111'; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.moveTo(cx, cy - s); ctx.lineTo(cx + s * 0.3, cy); ctx.lineTo(cx, cy + s); ctx.lineTo(cx - s * 0.3, cy); ctx.closePath(); ctx.fill(); ctx.stroke(); }
 }
-// chomp: the eaten fish squashes into the jaws, then a translucent ghost floats up, wobbles and fades
-const SOUL_MS = 2600;
-function drawSouls(t) {
-  V.souls = V.souls.filter((s) => t - s.t < SOUL_MS);
-  for (const s of V.souls) {
-    const age = t - s.t, w = FISH_LEN * s.s, h = FISH_HT * s.s * fatOf(s.s), spr = s.sp && window.FinFish.sprite(s.sp, s.c);
-    if (age < 320) { // squash + crunch lines
-      const k = age / 320; ctx.save(); ctx.translate(s.x, s.y); ctx.scale(s.f * (1 - 0.7 * k), 1 - 0.5 * k); ctx.globalAlpha = 1 - k * 0.6;
-      if (spr) ctx.drawImage(spr, -w / 2, -h / 2, w, h); ctx.restore();
-      ctx.save(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 4; for (let i = 0; i < 8; i++) { const a = i * Math.PI / 4, r = 20 + k * 50;
-        ctx.beginPath(); ctx.moveTo(s.x + Math.cos(a) * r, s.y + Math.sin(a) * r); ctx.lineTo(s.x + Math.cos(a) * (r + 14), s.y + Math.sin(a) * (r + 14)); ctx.stroke(); }
-      ctx.font = '700 30px Bungee, sans-serif'; ctx.textAlign = 'center'; ctx.lineWidth = 6; ctx.strokeStyle = '#111'; ctx.fillStyle = '#FFE600';
-      ctx.strokeText('CHOMP!', s.x, s.y - 50 - k * 20); ctx.fillText('CHOMP!', s.x, s.y - 50 - k * 20); ctx.restore();
-      continue;
-    }
-    const k = (age - 320) / (SOUL_MS - 320), rise = REDUCED ? 0 : k * 170, wob = REDUCED ? 0 : Math.sin(k * 14) * 18 * (1 - k * 0.5);
-    const a = (k < 0.15 ? k / 0.15 : 1) * (1 - k) * 0.75;
-    ctx.save(); ctx.translate(s.x + wob, s.y - rise); ctx.globalAlpha = a;
-    // ghost body
-    const gw = Math.max(36, w * 0.5), gh = gw * 1.15;
-    ctx.fillStyle = 'rgba(235,245,255,.95)'; ctx.strokeStyle = 'rgba(17,17,17,.6)'; ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.moveTo(-gw / 2, gh * 0.25); ctx.arc(0, -gh * 0.1, gw / 2, Math.PI, 0);
-    ctx.lineTo(gw / 2, gh * 0.45); for (let i = 0; i < 4; i++) { const x0 = gw / 2 - (i + 0.5) * gw / 4; ctx.quadraticCurveTo(x0, gh * (i % 2 ? 0.6 : 0.3) + (REDUCED ? 0 : Math.sin(t / 120 + i) * 3), x0 - gw / 8, gh * 0.45); }
-    ctx.closePath(); ctx.fill(); ctx.stroke();
-    ctx.fillStyle = '#111'; ctx.beginPath(); ctx.ellipse(-gw * 0.16, -gh * 0.12, gw * 0.07, gw * 0.1, 0, 0, 7); ctx.ellipse(gw * 0.16, -gh * 0.12, gw * 0.07, gw * 0.1, 0, 0, 7); ctx.fill();
-    ctx.beginPath(); ctx.ellipse(0, gh * 0.08, gw * 0.08, gw * 0.06, 0, 0, 7); ctx.fill();
-    if (spr) { ctx.globalAlpha = a * 0.35; ctx.scale(s.f, 1); ctx.drawImage(spr, -gw * 0.45, gh * 0.05, gw * 0.9, gw * 0.7); }
+// chomp: cartoon red splat bursting out + a few bubbles + "CHOMP!", gone within ~1.5 s
+const SPLAT_MS = 1500;
+function mkSplat(x, y, size, t) {
+  const n = 12, drops = [], bub = [];
+  for (let i = 0; i < n; i++) { const a = (i / n) * Math.PI * 2 + rand(-0.25, 0.25); drops.push({ a, d: rand(50, 110) * Math.max(0.8, size), r: rand(5, 13) * Math.max(0.8, size) }); }
+  for (let i = 0; i < 5; i++) bub.push({ dx: rand(-40, 40), r: rand(4, 9), sp: rand(60, 120), ph: rand(0, 6) });
+  const bumps = []; for (let i = 0; i < 9; i++) bumps.push(rand(0.75, 1.25));
+  return { x, y, s: Math.max(0.8, size), t, drops, bub, bumps };
+}
+function splatBlob(r, bumps) {
+  ctx.beginPath(); const n = bumps.length;
+  for (let i = 0; i <= n; i++) { const a = (i / n) * Math.PI * 2, rr = r * bumps[i % n], a0 = ((i - 0.5) / n) * Math.PI * 2, rc = r * 1.35 * bumps[(i + 4) % n];
+    if (!i) ctx.moveTo(Math.cos(a) * rr, Math.sin(a) * rr); else ctx.quadraticCurveTo(Math.cos(a0) * rc, Math.sin(a0) * rc, Math.cos(a) * rr, Math.sin(a) * rr); }
+  ctx.closePath();
+}
+function drawSplats(t) {
+  V.splats = V.splats.filter((s) => t - s.t < SPLAT_MS);
+  for (const s of V.splats) {
+    const k = (t - s.t) / SPLAT_MS, fade = k < 0.55 ? 1 : 1 - (k - 0.55) / 0.45;
+    const pop = REDUCED ? 1 : Math.min(1, k * 7) * (1 + 0.25 * Math.exp(-k * 10) * Math.sin(k * 40));
+    ctx.save(); ctx.translate(s.x, s.y); ctx.globalAlpha = fade; ctx.lineWidth = 3; ctx.strokeStyle = '#111';
+    // main splat
+    ctx.save(); ctx.scale(pop, pop); splatBlob(34 * s.s, s.bumps); ctx.fillStyle = '#E8143C'; ctx.fill(); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,.55)'; ctx.beginPath(); ctx.ellipse(-10 * s.s, -12 * s.s, 9 * s.s, 5 * s.s, -0.5, 0, 7); ctx.fill(); ctx.restore();
+    // droplets fly out (ease-out) and sag a little
+    const e = REDUCED ? 0.7 : 1 - Math.pow(1 - Math.min(1, k * 1.8), 3);
+    for (const d of s.drops) { const x = Math.cos(d.a) * d.d * e, y = Math.sin(d.a) * d.d * e + (REDUCED ? 0 : 40 * k * k), r = d.r * (REDUCED ? 1 : 1 - 0.4 * k);
+      ctx.fillStyle = '#FF2B4F'; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill(); ctx.lineWidth = 2; ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,.6)'; ctx.beginPath(); ctx.arc(x - r * 0.35, y - r * 0.35, r * 0.28, 0, 7); ctx.fill(); }
+    // bubbles
+    if (!REDUCED) for (const b of s.bub) { const y = -b.sp * k * 1.4, x = b.dx + Math.sin(t / 150 + b.ph) * 5;
+      ctx.strokeStyle = 'rgba(255,255,255,.9)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, b.r, 0, 7); ctx.stroke(); }
     ctx.restore();
+    if (k < 0.45) { const tk = k / 0.45, sc = REDUCED ? 1 : 0.6 + 0.6 * Math.min(1, tk * 4);
+      ctx.save(); ctx.translate(s.x, s.y - 70 * s.s - (REDUCED ? 0 : tk * 16)); ctx.scale(sc, sc); ctx.globalAlpha = 1 - Math.max(0, tk - 0.7) / 0.3;
+      ctx.font = '700 34px Bungee, sans-serif'; ctx.textAlign = 'center'; ctx.lineWidth = 7; ctx.strokeStyle = '#111'; ctx.fillStyle = '#FFE600';
+      ctx.strokeText('CHOMP!', 0, 0); ctx.fillText('CHOMP!', 0, 0); ctx.restore(); }
   }
 }
 function drawEats(players, t) {
