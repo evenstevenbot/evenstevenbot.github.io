@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Fin Ops · フィンオプス · evenstevenbot</title>
+<meta name="description" content="Fin Ops: a free real-time multiplayer fish feeding frenzy for up to 20 players. Pick a fish, eat the flakes, shove your friends.">
+<link rel="icon" type="image/png" href="assets/logo/app-icon.png">
+<link rel="apple-touch-icon" href="assets/logo/app-icon.png">
+<meta name="theme-color" content="#FF2E88">
+<meta property="og:title" content="Fin Ops · フィンオプス">
+<meta property="og:image" content="https://evenstevenbot.github.io/games/finops/assets/logo/logo-horizontal.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bungee&family=Dela+Gothic+One&family=Fredoka:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="screen-home">
+<canvas id="tank" aria-label="Aquarium"></canvas>
+<div id="urgentFx" aria-hidden="true"><div class="stripes top"></div><div class="stripes bottom"></div></div>
+
+<!-- Home -->
+<section id="home" class="panel-screen">
+  <div class="card home-card">
+    <img class="logo" src="assets/logo/logo-horizontal.png" alt="Fin Ops フィンオプス">
+    <p class="sub">Up to 20 fish. Two kinds of flakes. One hungry winner.</p>
+    <button id="createBtn" class="big pink">Create a tank</button>
+    <div class="or"><span>or join one</span></div>
+    <form id="joinForm" class="join-row" autocomplete="off">
+      <input id="codeInput" maxlength="5" placeholder="ROOM CODE" aria-label="Room code" autocapitalize="characters" spellcheck="false">
+      <button class="big cyan" type="submit">Join</button>
+    </form>
+    <p id="homeError" class="err" role="alert"></p>
+    <a class="back" href="/">← evenstevenbot</a>
+  </div>
+</section>
+
+<!-- Fish select -->
+<section id="pick" class="panel-screen" hidden>
+  <div class="card pick-card">
+    <div class="room-box">
+      <div class="room-label">ROOM CODE <span class="jp">ルーム</span></div>
+      <div class="room-code-row">
+        <button id="pickCode" class="room-code" title="Copy room code"></button>
+        <div class="room-btns">
+          <button id="copyCodeBtn" class="pill yellow">Copy code</button>
+          <button id="copyLinkBtn" class="pill cyan">Copy invite link</button>
+        </div>
+      </div>
+      <div id="pickPlayers" class="muted"></div>
+    </div>
+    <label class="name-row">Your name <input id="nameInput" maxlength="14" placeholder="xX_Nemo_Xx" autocomplete="nickname"></label>
+    <div class="step-label">1 · Pick a fish type</div>
+    <div id="speciesGrid" class="species-grid" role="radiogroup" aria-label="Fish type"></div>
+    <div class="step-label">2 · Pick a color <span class="muted">(greyed = taken)</span></div>
+    <div id="colorGrid" class="color-grid" role="radiogroup" aria-label="Fish color"></div>
+    <p id="pickError" class="err" role="alert"></p>
+    <button id="diveBtn" class="big pink">Dive in!</button>
+  </div>
+</section>
+
+<!-- HUD -->
+<div id="hud" hidden>
+  <div class="hud-left"><img src="assets/logo/app-icon.png" alt="" class="mini-logo"><span id="phaseText" class="phase">FREE SWIM</span></div>
+  <div id="timerPill" class="timer-pill">1:00</div>
+  <button id="menuBtn" class="menu-btn" aria-label="Menu" aria-expanded="false" aria-controls="menu"><span></span><span></span><span></span></button>
+</div>
+
+<aside id="board" hidden>
+  <button id="boardToggle" class="board-head" aria-expanded="true"><span class="bun">LEADERBOARD</span><span class="jp">ランキング</span><span id="boardMine" class="board-mine"></span><span class="chev">▾</span></button>
+  <div id="boardRows" class="board-rows"></div>
+  <div id="boardFoot" class="board-foot"></div>
+</aside>
+
+<div id="lobbyBar" hidden>
+  <div id="readyCount" class="ready-count"></div>
+  <button id="readyBtn" class="big yellow">I'm ready</button>
+  <button id="startBtn" class="big pink" hidden>Start game</button>
+  <div class="hint">Swim with your mouse, a finger, or arrow keys / WASD</div>
+</div>
+
+<div id="countdown" hidden><div id="cdText"></div></div>
+
+<section id="endScreen" hidden>
+  <div class="card end-card">
+    <div class="end-title"><span class="bun">WINNER!</span> <span class="jp">優勝</span></div>
+    <div id="podium" class="podium"></div>
+    <ol id="finalList" class="final-list"></ol>
+    <div class="end-btns">
+      <button id="againBtn" class="big pink">Play again</button>
+      <button id="lobbyBtn" class="big cyan">Back to lobby</button>
+    </div>
+    <p id="endWait" class="muted"></p>
+  </div>
+</section>
+
+<div id="menu" hidden role="dialog" aria-label="Game menu">
+  <div class="menu-sec">
+    <div class="menu-h">Room code</div>
+    <div class="menu-code-row"><span id="menuCode" class="menu-code"></span><button id="menuCopy" class="pill yellow">Copy</button><button id="menuLink" class="pill cyan">Link</button></div>
+  </div>
+  <div class="menu-sec settings">
+    <div class="menu-h">Win by <span class="host-only">host only</span></div>
+    <div class="seg" id="modeSeg"><button data-mode="timer">Timer</button><button data-mode="goal">Point goal</button></div>
+    <div class="stepper" id="timerStep"><span>Timer</span><button data-d="-1" aria-label="Less time">−</button><b id="timerVal">1 min</b><button data-d="1" aria-label="More time">+</button></div>
+    <div class="stepper" id="goalStep"><span>Goal</span><button data-d="-1" aria-label="Lower goal">−</button><b id="goalVal">20 pts</b><button data-d="1" aria-label="Higher goal">+</button></div>
+    <div class="menu-h">Food quantity <span class="host-only">host only</span></div>
+    <div class="seg" id="foodSeg"><button data-food="low">Low</button><button data-food="med">Medium</button><button data-food="high">High</button></div>
+  </div>
+  <div class="menu-sec">
+    <button id="startOverBtn" class="wide yellow">Start over <small class="host-only">host only</small></button>
+    <button id="quitBtn" class="wide black">Quit game</button>
+  </div>
+</div>
+
+<section id="msg" hidden><div class="card msg-card"><h2 id="msgTitle"></h2><p id="msgBody"></p><button id="msgBtn" class="big pink">Start over</button></div></section>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js"></script>
+<script src="fish.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

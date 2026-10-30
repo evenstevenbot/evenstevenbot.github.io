@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>games · evenstevenbot</title>
+<meta name="description" content="Free browser games from evenstevenbot.">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/favicon-180.png">
+<meta name="theme-color" content="#FF2E88">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  :root { --pink:#FF2E88; --cyan:#00E5FF; --yellow:#FFE600; --orange:#FF6A00; --black:#111111; --paper:#F7F4EF; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--paper); color:var(--black); font-family:"Fredoka", system-ui, sans-serif; font-weight:500; min-height:100vh; padding:1.5rem clamp(1.25rem, 4vw, 3.5rem) 2rem; }
+  header a { color:var(--black); font-weight:700; text-decoration:none; }
+  h1 { font-weight:700; font-size:clamp(3rem, 9vw, 6rem); margin:1.5rem 0 1rem; color:var(--pink); -webkit-text-stroke:0.05em var(--black); paint-order:stroke fill; text-shadow:0.06em 0.06em 0 var(--black); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:1.5rem; }
+  .game { display:block; background:#fff; border:3px solid var(--black); border-radius:16px; padding:1rem; color:var(--black); text-decoration:none; box-shadow:5px 5px 0 var(--black); transition:transform .12s ease, box-shadow .12s ease; }
+  .game:hover, .game:focus-visible { transform:translate(-2px,-3px); box-shadow:8px 8px 0 var(--cyan); outline:none; }
+  .game img { width:100%; max-width:160px; display:block; margin:0 auto .6rem; }
+  .game h2 { font-size:1.6rem; } .game p { margin-top:.3rem; }
+  footer { margin-top:2rem; font-size:0.85rem; color:#6b6b6b; }
+</style>
+</head>
+<body>
+<header><a href="/">← evenstevenbot</a></header>
+<h1>games</h1>
+<div class="grid">
+  <a class="game" href="/games/finops/">
+    <img src="/games/finops/assets/logo/app-icon.png" alt="">
+    <h2>Fin Ops <span lang="ja">フィンオプス</span></h2>
+    <p>Multiplayer fish feeding frenzy for up to 20 players. Eat flakes, grow, shove your friends.</p>
+  </a>
+</div>
+<footer>evenstevenbot · 2026</footer>
+</body>
+</html>
