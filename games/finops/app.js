@@ -168,19 +168,23 @@ function mouthOf(p) {
 }
 const fatOf = (size) => 1 + (size - 1) * 0.2;
 const radiusOf = (size) => 30 * size;
-const SHARK_X = 3; // great white = 3x the fish's normal size
+const SHARK_X = 2; // great white = 2x the fish's normal size
 // shark snout: front of the body, a touch below centre (fish-local, before flip/tilt)
 const sharkMouth = (w, h) => ({ lx: 0.43 * w, ly: 0.1 * h * 0.6 });
 const eatRadius = (size) => FOOD_R + 8 + 4 * size;
 // suction: a cone in front of the mouth that captures flakes, then pulls them in over CAP_MS
 const suckRadius = (size) => eatRadius(size) * 1.9;
-const SUCK_COS = Math.cos(32 * Math.PI / 180); // ~64° cone around the facing direction
+const SUCK_COS = Math.cos(60 * Math.PI / 180); // wide ~120° cone around the facing direction
 const CAP_MS = REDUCED ? 90 : 150;
 const faceOf = (p) => ({ x: Math.cos(p.a) * p.f, y: Math.sin(p.a) });
-function inSuction(p, m, f) {
-  const dx = f.x - m.x, dy = f.y - m.y, d = Math.hypot(dx, dy);
-  if (d < eatRadius(p.size) * 0.55) return true; // touching the lips counts from any side
-  if (d > suckRadius(p.size)) return false;
+// forgiving capture: anything whose own radius overlaps the mouth (drawn mouth position, same on host + clients)
+// is sucked in from any side; a little extra reach straight ahead of the face. No vacuuming from afar.
+const lipRadius = (size) => 12 + 7 * size;
+const PILL_CAP_R = 26; // the pill's drawn capsule half-length (PILL_R * 1.45 scale)
+function inSuction(p, m, f, itemR = FOOD_R) {
+  const dx = f.x - m.x, dy = f.y - m.y, d = Math.hypot(dx, dy), touch = lipRadius(p.size) + itemR;
+  if (d <= touch) return true;
+  if (d > touch * 1.35) return false;
   const fc = faceOf(p); return (dx * fc.x + dy * fc.y) / (d || 1) >= SUCK_COS;
 }
 
@@ -207,11 +211,13 @@ function moveFlake(f, dt, mouths, shy = 1) {
   f.t += dt; f.dart -= dt;
   if (f.dart <= 0) { f.dart = rand(0.5, 1.6); f.dvx = rand(-1, 1) * rand(60, 140) * shy; }
   f.dvx *= Math.exp(-2.5 * dt);
-  let ev = 0, evy = 0;
+  let ev = 0, evy = 0, near = false;
   for (const [, m] of mouths) {
     const dx = f.x - m.x, dy = f.y - m.y, d = Math.hypot(dx, dy);
+    if (d < 140) near = true;
     if (d < 95 * shy && d > 40) { const k = (1 - d / (95 * shy)) * 120 * shy; ev += dx / d * k; evy += dy / d * k * 0.4; }
   }
+  if (near) { ev *= 0.25; evy *= 0.25; f.dvx *= Math.exp(-6 * dt); } // close to a mouth: barely dodges, so it's catchable
   f.x += (f.drift + f.dvx + ev + Math.cos(f.t * f.wf + f.ph) * f.wob * f.wf * 0.5) * dt;
   f.y += (f.vy + evy) * dt;
   f.x = clamp(f.x, 15, WORLD_W - 15);
@@ -276,7 +282,7 @@ function hostTick() {
       if (f.fade > 0 && f.y > 0) for (const [p, m] of mouths) {
         if (inSuction(p, m, f)) {
           f.capd = true; f.cap = p.id; f.capAt = Date.now(); p.score += f.k; p.eats++; p.lastScore = Date.now();
-          p.base = Math.min(MAX_SIZE, p.base * GROW); p.size = p.base * (p.pw ? 2 : 1);
+          p.base = Math.min(MAX_SIZE, p.base * GROW); p.size = p.base * (p.pw ? SHARK_X : 1);
           H.ev.push([f.id, p.id, Math.round(f.x), Math.round(f.y), f.k, H.tick]); break;
         }
       }
@@ -295,7 +301,7 @@ function hostTick() {
       } else {
         moveFlake(pl, dt, mouths, 1.25);
         if (pl.fade <= 0) { H.pill = null; H.nextPill = nowMs + pillGap(); }
-        else if (pl.y > 0) for (const [p, m] of mouths) if (!p.pw && inSuction(p, m, pl)) { pl.capd = true; pl.cap = p.id; pl.capAt = nowMs; break; }
+        else if (pl.y > 0) for (const [p, m] of mouths) if (!p.pw && inSuction(p, m, pl, PILL_CAP_R)) { pl.capd = true; pl.cap = p.id; pl.capAt = nowMs; break; }
       }
     }
     // powered fish: chomp one other fish (mouth touching its body), or wear off after PW_MS
@@ -1302,5 +1308,5 @@ function showPickWhenConnected() {
 }
 $('#joinForm').addEventListener('submit', showPickWhenConnected);
 requestAnimationFrame(frame);
-if (QS.has('test')) window.__finops = { V, H, cam, w2s: (x, y) => ({ x: (x - cam.x) * cam.z + VW / 2, y: (y - cam.y) * cam.z + VH / 2 }), get role() { return role; }, get myId() { return myId; }, get room() { return room; }, hostSet, hostStart, mouthOf, suckRadius, CAP_MS, pred, get drawn() { return window.__drawn; }, spawnPill, PW_MS };
+if (QS.has('test')) window.__finops = { V, H, cam, w2s: (x, y) => ({ x: (x - cam.x) * cam.z + VW / 2, y: (y - cam.y) * cam.z + VH / 2 }), get role() { return role; }, get myId() { return myId; }, get room() { return room; }, hostSet, hostStart, mouthOf, suckRadius, SHARK_X, CAP_MS, pred, get drawn() { return window.__drawn; }, spawnPill, PW_MS };
 })();
