@@ -1047,7 +1047,7 @@ function drawShark(w, h, ds, t, fv, hex) {
   ctx.lineWidth = lw * 1.3; ctx.beginPath(); ctx.moveTo(ex - er * 1.6, ey - er * 1.7); ctx.lineTo(ex + er * 1.5, ey - er * 0.6); ctx.stroke();
   ctx.lineWidth = lw;
 }
-// MAGIC SHARK PILL: cached glossy capsule with a shark-fin emblem, rotating rays, pulsing halo,
+// MAGIC SHARK PILL: cached glossy capsule (no emblems or rays), pulsing halo,
 // holographic shimmer sweep, orbiting sparkles and a glitter trail. Sprites are built once.
 const PILL_SPR = {};
 function pillSprites() {
@@ -1064,20 +1064,12 @@ function pillSprites() {
   g.fillStyle = '#FFE600'; g.fillRect(-2, -r, 4, 2 * r); // gold band
   g.fillStyle = 'rgba(255,255,255,.75)'; g.beginPath(); g.ellipse(-L * 0.1, -r * 0.5, L * 0.75, r * 0.2, 0, 0, 7); g.fill();
   g.restore();
-  // shark-fin emblem on the cyan half
-  g.fillStyle = '#fff'; g.strokeStyle = '#111'; g.lineWidth = 1.6; g.beginPath(); g.moveTo(L * 0.18, r * 0.45); g.quadraticCurveTo(L * 0.42, -r * 0.1, L * 0.38, -r * 0.75); g.quadraticCurveTo(L * 0.62, -r * 0.05, L * 0.78, r * 0.45); g.closePath(); g.fill(); g.stroke();
-  // tooth on the pink half
-  g.fillStyle = '#fff'; g.beginPath(); g.moveTo(-L * 0.62, -r * 0.45); g.lineTo(-L * 0.22, -r * 0.45); g.lineTo(-L * 0.42, r * 0.55); g.closePath(); g.fill(); g.stroke();
   g.lineWidth = 3; body(g); g.stroke();
-  // rays
-  const R2 = 90, rays = mk(R2 * 2, R2 * 2), q = rays.getContext('2d'); q.translate(R2, R2);
-  const rg = q.createRadialGradient(0, 0, 4, 0, 0, R2); rg.addColorStop(0, 'rgba(255,240,140,.85)'); rg.addColorStop(1, 'rgba(255,240,140,0)');
-  q.fillStyle = rg; for (let i = 0; i < 10; i++) { const a = i * Math.PI / 5; q.beginPath(); q.moveTo(0, 0); q.arc(0, 0, R2, a - 0.13, a + 0.13); q.closePath(); q.fill(); }
   // halo
   const R3 = 64, halo = mk(R3 * 2, R3 * 2), hq = halo.getContext('2d'), hg = hq.createRadialGradient(R3, R3, 4, R3, R3, R3);
   hg.addColorStop(0, 'rgba(255,255,255,.95)'); hg.addColorStop(0.25, 'rgba(0,229,255,.6)'); hg.addColorStop(0.6, 'rgba(169,112,255,.35)'); hg.addColorStop(1, 'rgba(255,46,136,0)');
   hq.fillStyle = hg; hq.fillRect(0, 0, R3 * 2, R3 * 2);
-  Object.assign(PILL_SPR, { cap, cw: W / S, ch: Hh / S, rays, R2, halo, R3, r, L, body });
+  Object.assign(PILL_SPR, { cap, cw: W / S, ch: Hh / S, halo, R3, r, L, body });
   return PILL_SPR;
 }
 const SPARK_COLS = ['#FFE600', '#00E5FF', '#FF2E88', '#fff', '#A970FF'];
@@ -1094,7 +1086,7 @@ function drawPill(x, y, t, alpha, scale, full) {
   ctx.save(); ctx.translate(x, y); ctx.globalAlpha = alpha;
   if (full) {
     const pulse = REDUCED ? 1 : 1 + 0.12 * Math.sin(t / 150);
-    ctx.save(); ctx.rotate(REDUCED ? 0 : t / 1400); ctx.globalAlpha = alpha * 0.7; ctx.drawImage(P.rays, -P.R2, -P.R2); ctx.restore();
+    
     ctx.save(); ctx.globalCompositeOperation = 'lighter'; const hs = P.R3 * pulse; ctx.drawImage(P.halo, -hs, -hs, hs * 2, hs * 2); ctx.restore();
   }
   ctx.rotate(REDUCED ? -0.35 : Math.sin(t / 420) * 0.35 - 0.3); ctx.scale(scale * 1.45, scale * 1.45);
@@ -1123,14 +1115,14 @@ function drawBursts(t) {
 }
 // off-screen pointer to the pill, drawn in screen space
 function drawPillArrow(pill, t) {
-  const sx = (pill.x - cam.x) * cam.z + VW / 2, sy = (pill.y - cam.y) * cam.z + VH / 2, m = 46;
+  const sx = (pill.x - cam.x) * cam.z + VW / 2, sy = (pill.y - cam.y) * cam.z + VH / 2, m = 66;
   if (sx > 0 && sx < VW && sy > 0 && sy < VH) return;
   const cx = VW / 2, cy = VH / 2, dx = sx - cx, dy = sy - cy, sc = Math.min((VW / 2 - m) / Math.abs(dx || 1e-6), (VH / 2 - m) / Math.abs(dy || 1e-6));
   const ax = cx + dx * sc, ay = cy + dy * sc, ang = Math.atan2(dy, dx), pul = REDUCED ? 1 : 1 + 0.12 * Math.sin(t / 120);
   ctx.save(); ctx.translate(ax, ay); ctx.scale(pul, pul);
-  ctx.fillStyle = 'rgba(255,230,0,.35)'; ctx.beginPath(); ctx.arc(0, 0, 30, 0, 7); ctx.fill();
-  ctx.save(); ctx.rotate(ang); ctx.fillStyle = '#FFE600'; ctx.strokeStyle = '#111'; ctx.lineWidth = 3;
-  ctx.beginPath(); ctx.moveTo(36, 0); ctx.lineTo(18, -13); ctx.lineTo(18, 13); ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.restore();
+  ctx.fillStyle = 'rgba(17,17,40,.8)'; ctx.strokeStyle = '#00E5FF'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 0, 28, 0, 7); ctx.fill(); ctx.stroke();
+  ctx.save(); ctx.rotate(ang); ctx.lineJoin = 'round'; ctx.beginPath(); ctx.moveTo(48, 0); ctx.lineTo(24, -17); ctx.lineTo(24, 17); ctx.closePath();
+  ctx.strokeStyle = '#111'; ctx.lineWidth = 7; ctx.stroke(); ctx.fillStyle = '#FF2E88'; ctx.fill(); ctx.strokeStyle = '#00E5FF'; ctx.lineWidth = 2.5; ctx.stroke(); ctx.restore();
   const P = pillSprites(); ctx.rotate(-0.3); ctx.drawImage(P.cap, -P.cw * 0.6, -P.ch * 0.6, P.cw * 1.2, P.ch * 1.2);
   ctx.restore();
 }
