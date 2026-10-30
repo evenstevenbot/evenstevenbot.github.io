@@ -41,7 +41,8 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const rand = (a, b) => a + Math.random() * (b - a);
 const now = () => performance.now();
 const newCode = () => Array.from({ length: 5 }, () => CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)]).join('');
-const cleanCode = (s) => (s || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 5);
+const INPUT_TIMEOUT_MS = 1200; // clients resend input every 500 ms even when unchanged
+const cleanCode = (s) => String(s || '').trim().toUpperCase().replace(/[^A-Z]/g, '').slice(0, 5); // 'abcde', ' AbC de ' -> 'ABCDE'
 const cleanName = (s) => String(s || '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 14);
 const speciesOf = (id) => SPECIES.find((s) => s.id === id) || SPECIES[0];
 const validFish = (sp, c) => SPECIES.some((s) => s.id === sp) && COLORS.some((x) => x.id === c);
@@ -167,7 +168,9 @@ function hostTick() {
   if (H.ph === 'countdown' && Date.now() >= H.cdEnd) { H.ph = 'play'; H.playStart = Date.now(); H.spawnAcc = 2; bumpMeta(); }
   const players = hostPlayerList();
   // fish movement
+  const nowMs = Date.now();
   for (const p of players) {
+    if (p.id !== 0 && nowMs - (p.inAt || 0) > INPUT_TIMEOUT_MS) { p.ax = 0; p.ay = 0; } // stalled client: stop steering, drag glides it to a stop
     const mag = Math.hypot(p.ax, p.ay); let ax = p.ax, ay = p.ay; if (mag > 1) { ax /= mag; ay /= mag; }
     const maxV = 340 / Math.pow(p.size, 0.3), acc = 1100;
     p.vx += ax * acc * dt; p.vy += ay * acc * dt;
@@ -259,7 +262,7 @@ function hostHandle(pid, d) {
       addPlayer(pid, { name, sp, c }); e.c.send({ t: 'welcome', id: pid });
       break;
     }
-    case 'in': if (p) { p.ax = clamp(+d.x || 0, -1, 1); p.ay = clamp(+d.y || 0, -1, 1); } break;
+    case 'in': if (p) { p.ax = clamp(+d.x || 0, -1, 1); p.ay = clamp(+d.y || 0, -1, 1); p.inAt = Date.now(); } break;
     case 'ready': if (p) { p.ready = !!d.v; bumpMeta(); } break;
     case 'bye': try { e.c.close(); } catch {} dropClient(pid); break;
   }
@@ -332,7 +335,7 @@ function hostLeft() {
   showMsg('The host left the tank', 'This game ended because the host closed their page. Start a new tank to keep playing.');
 }
 function send(m) {
-  if (role === 'host') { if (m.t === 'ready') { const p = H.players.get(0); if (p) { p.ready = !!m.v; bumpMeta(); } } else if (m.t === 'in') { const p = H.players.get(0); if (p) { p.ax = m.x; p.ay = m.y; } } else if (m.t === 'hello') hostHello(m); return; }
+  if (role === 'host') { if (m.t === 'ready') { const p = H.players.get(0); if (p) { p.ready = !!m.v; bumpMeta(); } } else if (m.t === 'in') { const p = H.players.get(0); if (p) { p.ax = m.x; p.ay = m.y; p.inAt = Date.now(); } } else if (m.t === 'hello') hostHello(m); return; }
   if (hostConn) try { hostConn.send(m); } catch {}
 }
 function hostHello(m) {
@@ -524,28 +527,39 @@ function renderBoard(players) {
 }
 
 /* ---------------- input ---------------- */
-const keys = new Set(); let pointer = null, pointerKind = 'mouse', lastSent = { x: 9, y: 9, at: 0 };
+const keys = new Set(); let pointer = null, pointerKind = 'mouse', pointerDown = false, lastSent = { x: 9, y: 9, at: 0 };
+// pointer.w is a fixed WORLD point: the fish swims to where you pointed and stops there. (It used to be a
+// screen point; because the camera follows your fish, a parked mouse stayed ahead of it forever = endless drift.)
+const STEER_KEYS = ['arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'w', 'a', 's', 'd'];
+const isTyping = (t) => t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+function releaseAll() { keys.clear(); pointer = null; pointerDown = false; sendZero(); }
 addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT') return;
   const k = e.key.toLowerCase();
-  if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'w', 'a', 's', 'd'].includes(k)) { keys.add(k); e.preventDefault(); }
   if (k === 'escape') closeMenu();
+  if (k === 'meta' || k === 'control' || k === 'alt') { keys.clear(); return; } // macOS drops keyup for keys held with Cmd
+  if (isTyping(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (STEER_KEYS.includes(k)) { keys.add(k); e.preventDefault(); }
 });
-addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
-addEventListener('blur', () => keys.clear());
+addEventListener('keyup', (e) => { const k = e.key.toLowerCase(); keys.delete(k); if (k === 'meta' || k === 'control' || k === 'alt') keys.clear(); });
+addEventListener('blur', releaseAll);
+document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAll(); });
+addEventListener('pagehide', releaseAll);
 const cv = $('#tank');
-cv.addEventListener('pointermove', (e) => { if (e.pointerType === 'mouse' || pointer) { pointer = { x: e.clientX, y: e.clientY }; pointerKind = e.pointerType; } });
-cv.addEventListener('pointerdown', (e) => { pointer = { x: e.clientX, y: e.clientY }; pointerKind = e.pointerType; try { cv.setPointerCapture(e.pointerId); } catch {} closeMenu(); });
-const endTouch = (e) => { if (e.pointerType !== 'mouse') pointer = null; };
-cv.addEventListener('pointerup', endTouch); cv.addEventListener('pointercancel', endTouch);
-cv.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') pointer = null; });
+const aim = (e) => { pointer = { x: e.clientX, y: e.clientY, w: screenToWorld(e.clientX, e.clientY) }; pointerKind = e.pointerType; };
+cv.addEventListener('pointermove', (e) => { if (e.pointerType === 'mouse' || pointerDown) aim(e); });
+cv.addEventListener('pointerdown', (e) => { pointerDown = true; aim(e); try { cv.setPointerCapture(e.pointerId); } catch {} closeMenu(); });
+const endPointer = (e) => { pointerDown = false; if (e.pointerType !== 'mouse' || e.type !== 'pointerup') { pointer = null; sendZero(); } };
+cv.addEventListener('pointerup', endPointer); cv.addEventListener('pointercancel', endPointer);
+cv.addEventListener('pointerleave', (e) => { if (!pointerDown) { pointer = null; sendZero(); } });
+cv.addEventListener('lostpointercapture', (e) => { if (e.pointerType !== 'mouse') { pointerDown = false; pointer = null; sendZero(); } });
+function sendZero() { if (!joined) return; lastSent = { x: 0, y: 0, at: Date.now() }; try { send({ t: 'in', x: 0, y: 0 }); } catch {} }
 function steer(me) {
   let x = 0, y = 0;
   if (keys.has('arrowleft') || keys.has('a')) x -= 1; if (keys.has('arrowright') || keys.has('d')) x += 1;
   if (keys.has('arrowup') || keys.has('w')) y -= 1; if (keys.has('arrowdown') || keys.has('s')) y += 1;
   if (x || y) { const m = Math.hypot(x, y); x /= m; y /= m; }
   else if (pointer && me) {
-    const w = screenToWorld(pointer.x, pointer.y); const dx = w.x - me.x, dy = w.y - me.y, d = Math.hypot(dx, dy);
+    const w = pointer.w; const dx = w.x - me.x, dy = w.y - me.y, d = Math.hypot(dx, dy);
     const dead = 12, full = pointerKind === 'mouse' ? 160 : 120;
     if (d > dead) { const k = Math.min(1, (d - dead) / full); x = dx / d * k; y = dy / d * k; }
   }
@@ -803,7 +817,7 @@ $('#readyBtn').onclick = () => send({ t: 'ready', v: !readyLocal });
 $('#startBtn').onclick = () => hostStart();
 $('#againBtn').onclick = () => hostStart();
 $('#lobbyBtn').onclick = () => hostToLobby();
-$('#menuBtn').onclick = (e) => { e.stopPropagation(); const m = $('#menu'); m.hidden = !m.hidden; $('#menuBtn').setAttribute('aria-expanded', String(!m.hidden)); };
+$('#menuBtn').onclick = (e) => { e.stopPropagation(); const m = $('#menu'); m.hidden = !m.hidden; if (!m.hidden) releaseAll(); $('#menuBtn').setAttribute('aria-expanded', String(!m.hidden)); };
 $('#menu').addEventListener('pointerdown', (e) => e.stopPropagation());
 document.addEventListener('pointerdown', (e) => { if (!$('#menu').hidden && !e.target.closest('#menu') && !e.target.closest('#menuBtn')) closeMenu(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#menu').hidden) { closeMenu(); $('#menuBtn').focus(); } });
@@ -833,5 +847,5 @@ function showPickWhenConnected() {
 }
 $('#joinForm').addEventListener('submit', showPickWhenConnected);
 requestAnimationFrame(frame);
-window.__finops = { V, H, cam, w2s: (x, y) => ({ x: (x - cam.x) * cam.z + VW / 2, y: (y - cam.y) * cam.z + VH / 2 }), get role() { return role; }, get myId() { return myId; }, get room() { return room; }, hostSet, hostStart };
+if (QS.has('test')) window.__finops = { V, H, cam, w2s: (x, y) => ({ x: (x - cam.x) * cam.z + VW / 2, y: (y - cam.y) * cam.z + VH / 2 }), get role() { return role; }, get myId() { return myId; }, get room() { return room; }, hostSet, hostStart };
 })();
