@@ -15,7 +15,7 @@ const WORLD_W = 2000, WORLD_H = 1250, SAND_H = 70;
 const FISH_LEN = 110, FISH_HT = FISH_LEN * 208 / 268;
 const MAX_SIZE = 2.6, GROW = 1.1;
 const TICK_MS = 33, SNAP_EVERY = 2, INTERP_MAX = 150, INTERP_MIN = 50, HOST_INTERP = 45;
-const FOOD_R = 9, PILL_R = 13;
+const FOOD_R = 9, PILL_R = 18;
 // flakes / second (scaled by player count). Round 2: 20% less food at every level (was 1.1 / 2.1 / 3.6).
 const FOOD_RATE = { low: 0.88, med: 1.68, high: 2.88 };
 const DEFAULTS = { mode: 'timer', min: 1, goal: 20, food: 'med', pw: true };
@@ -778,7 +778,7 @@ function predStep(dt) {
 /* one-off effects from the host: pill swallowed, chomp + splat, power-up over */
 function onFx(d) {
   const t = now(), pl = V.meta.pl || {};
-  if (d.k === 'pill') { const fv = fishView(d.pid); fv.pwAt = t; fv.vs += 4; if (d.pid === myId) toast('MAGIC SHARK PILL! You\'re a great white 🦈 chomp ONE fish in 15s!'); else if (pl[d.pid]) toast(pl[d.pid][0] + ' got the magic shark pill! 🦈'); }
+  if (d.k === 'pill') { const fv = fishView(d.pid); if (fv.wx != null) BURSTS.push({ x: fv.wx, y: fv.wy, t, r: Math.random() * 6 }); fv.pwAt = t; fv.vs += 4; if (d.pid === myId) toast('MAGIC SHARK PILL! You\'re a great white 🦈 chomp ONE fish in 15s!'); else if (pl[d.pid]) toast(pl[d.pid][0] + ' got the magic shark pill! 🦈'); }
   else if (d.k === 'unpw') { const fv = fishView(d.pid); fv.unAt = t; if (d.why === 'ate' && !REDUCED) { fv.holdShark = t + 650; fv.sharkSize = fv.ds; } else fv.vs -= 2; if (d.pid === myId && d.why === 'time') toast('Power-up wore off'); }
   else if (d.k === 'chomp') {
     const m = pl[d.b] || [];
@@ -836,7 +836,7 @@ function frame() {
   ctx.setTransform(DPR * cam.z, 0, 0, DPR * cam.z, DPR * (VW / 2 - cam.x * cam.z + sx), DPR * (VH / 2 - cam.y * cam.z + sy));
   drawTank(t, dt);
   drawFood(foods, t);
-  if (pill) drawPill(pill.x, pill.y, t, clamp(pill.fade, 0, 1), 1);
+  if (pill) { if (pill.fade > 0.5) pillAlert(pill.id); drawPill(pill.x, pill.y, t, clamp(pill.fade, 0, 1), 1, true); }
   // fish (smaller first so big fish sit on top), names after
   const sorted = players.slice().sort((a, b) => a.size - b.size);
   const bait = pill ? foods.concat([{ x: pill.x, y: pill.y }]) : foods;
@@ -844,7 +844,9 @@ function frame() {
   for (const p of sorted) { const fv = fishView(p.id); fv.wx = p.x + p.f * 0.43 * FISH_LEN * fv.ds; fv.wy = p.y; drawFish(p, bait, t, dt); }
   drawEats(players, t);
   drawSplats(t);
+  drawBursts(t);
   for (const p of sorted) drawName(p);
+  if (pill && V.ph === 'play') { ctx.setTransform(DPR, 0, 0, DPR, 0, 0); drawPillArrow(pill, t); ctx.setTransform(DPR * cam.z, 0, 0, DPR * cam.z, DPR * (VW / 2 - cam.x * cam.z + sx), DPR * (VH / 2 - cam.y * cam.z + sy)); }
   if (urgent) { ctx.setTransform(DPR, 0, 0, DPR, 0, 0); const a = 0.10 + 0.08 * Math.sin(t / 160); ctx.fillStyle = `rgba(255,46,136,${a})`; ctx.fillRect(0, 0, VW, VH); }
   // HUD text
   updateHud(players, t);
@@ -1045,22 +1047,100 @@ function drawShark(w, h, ds, t, fv, hex) {
   ctx.lineWidth = lw * 1.3; ctx.beginPath(); ctx.moveTo(ex - er * 1.6, ey - er * 1.7); ctx.lineTo(ex + er * 1.5, ey - er * 0.6); ctx.stroke();
   ctx.lineWidth = lw;
 }
-// glowing capsule pill
-function drawPill(x, y, t, alpha, scale) {
-  ctx.save(); ctx.translate(x, y); ctx.rotate(REDUCED ? 0.5 : Math.sin(t / 300) * 0.6 + 0.5); ctx.scale(scale, scale); ctx.globalAlpha = alpha;
-  const hue = (t / 6) % 360, pulse = REDUCED ? 1 : 1 + 0.15 * Math.sin(t / 120);
-  const gl = ctx.createRadialGradient(0, 0, 2, 0, 0, 40 * pulse);
-  gl.addColorStop(0, `hsla(${hue},100%,75%,.9)`); gl.addColorStop(1, `hsla(${hue},100%,60%,0)`);
-  ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(0, 0, 40 * pulse, 0, 7); ctx.fill();
-  const r = PILL_R * 0.75, L = PILL_R * 1.1;
-  ctx.lineWidth = 3; ctx.strokeStyle = '#111';
-  ctx.fillStyle = '#FF2E88'; ctx.beginPath(); ctx.arc(-L / 2, 0, r, Math.PI / 2, Math.PI * 1.5); ctx.lineTo(0, -r); ctx.lineTo(0, r); ctx.closePath(); ctx.fill(); ctx.stroke();
-  ctx.fillStyle = '#00E5FF'; ctx.beginPath(); ctx.arc(L / 2, 0, r, -Math.PI / 2, Math.PI / 2); ctx.lineTo(0, r); ctx.lineTo(0, -r); ctx.closePath(); ctx.fill(); ctx.stroke();
-  ctx.fillStyle = 'rgba(255,255,255,.8)'; ctx.beginPath(); ctx.ellipse(-L / 2, -r * 0.4, r * 0.5, r * 0.22, 0, 0, 7); ctx.fill();
+// MAGIC SHARK PILL: cached glossy capsule with a shark-fin emblem, rotating rays, pulsing halo,
+// holographic shimmer sweep, orbiting sparkles and a glitter trail. Sprites are built once.
+const PILL_SPR = {};
+function pillSprites() {
+  if (PILL_SPR.cap) return PILL_SPR;
+  const mk = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
+  const S = 4, r = PILL_R * 0.8, L = PILL_R * 1.25, W = (L + 2 * r + 8) * S, Hh = (2 * r + 8) * S;
+  const cap = mk(W, Hh), g = cap.getContext('2d'); g.translate(W / 2, Hh / 2); g.scale(S, S);
+  const body = (c) => { c.beginPath(); c.arc(-L / 2, 0, r, Math.PI / 2, Math.PI * 1.5); c.lineTo(L / 2, -r); c.arc(L / 2, 0, r, -Math.PI / 2, Math.PI / 2); c.closePath(); };
+  g.save(); body(g); g.clip();
+  let gr = g.createLinearGradient(0, -r, 0, r); gr.addColorStop(0, '#FF7AC0'); gr.addColorStop(0.5, '#FF2E88'); gr.addColorStop(1, '#B0005A');
+  g.fillStyle = gr; g.fillRect(-L - r, -r, L + r, 2 * r);
+  gr = g.createLinearGradient(0, -r, 0, r); gr.addColorStop(0, '#9CF6FF'); gr.addColorStop(0.5, '#00E5FF'); gr.addColorStop(1, '#0088B8');
+  g.fillStyle = gr; g.fillRect(0, -r, L + r, 2 * r);
+  g.fillStyle = '#FFE600'; g.fillRect(-2, -r, 4, 2 * r); // gold band
+  g.fillStyle = 'rgba(255,255,255,.75)'; g.beginPath(); g.ellipse(-L * 0.1, -r * 0.5, L * 0.75, r * 0.2, 0, 0, 7); g.fill();
+  g.restore();
+  // shark-fin emblem on the cyan half
+  g.fillStyle = '#fff'; g.strokeStyle = '#111'; g.lineWidth = 1.6; g.beginPath(); g.moveTo(L * 0.18, r * 0.45); g.quadraticCurveTo(L * 0.42, -r * 0.1, L * 0.38, -r * 0.75); g.quadraticCurveTo(L * 0.62, -r * 0.05, L * 0.78, r * 0.45); g.closePath(); g.fill(); g.stroke();
+  // tooth on the pink half
+  g.fillStyle = '#fff'; g.beginPath(); g.moveTo(-L * 0.62, -r * 0.45); g.lineTo(-L * 0.22, -r * 0.45); g.lineTo(-L * 0.42, r * 0.55); g.closePath(); g.fill(); g.stroke();
+  g.lineWidth = 3; body(g); g.stroke();
+  // rays
+  const R2 = 90, rays = mk(R2 * 2, R2 * 2), q = rays.getContext('2d'); q.translate(R2, R2);
+  const rg = q.createRadialGradient(0, 0, 4, 0, 0, R2); rg.addColorStop(0, 'rgba(255,240,140,.85)'); rg.addColorStop(1, 'rgba(255,240,140,0)');
+  q.fillStyle = rg; for (let i = 0; i < 10; i++) { const a = i * Math.PI / 5; q.beginPath(); q.moveTo(0, 0); q.arc(0, 0, R2, a - 0.13, a + 0.13); q.closePath(); q.fill(); }
+  // halo
+  const R3 = 64, halo = mk(R3 * 2, R3 * 2), hq = halo.getContext('2d'), hg = hq.createRadialGradient(R3, R3, 4, R3, R3, R3);
+  hg.addColorStop(0, 'rgba(255,255,255,.95)'); hg.addColorStop(0.25, 'rgba(0,229,255,.6)'); hg.addColorStop(0.6, 'rgba(169,112,255,.35)'); hg.addColorStop(1, 'rgba(255,46,136,0)');
+  hq.fillStyle = hg; hq.fillRect(0, 0, R3 * 2, R3 * 2);
+  Object.assign(PILL_SPR, { cap, cw: W / S, ch: Hh / S, rays, R2, halo, R3, r, L, body });
+  return PILL_SPR;
+}
+const SPARK_COLS = ['#FFE600', '#00E5FF', '#FF2E88', '#fff', '#A970FF'];
+function star(x, y, s, col) { ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(x, y - s); ctx.lineTo(x + s * 0.3, y - s * 0.3); ctx.lineTo(x + s, y); ctx.lineTo(x + s * 0.3, y + s * 0.3); ctx.lineTo(x, y + s); ctx.lineTo(x - s * 0.3, y + s * 0.3); ctx.lineTo(x - s, y); ctx.lineTo(x - s * 0.3, y - s * 0.3); ctx.closePath(); ctx.fill(); }
+// glitter trail (fixed pool, no per-frame allocation)
+const GLIT = Array.from({ length: 40 }, () => ({ x: 0, y: 0, t: -1e9, c: 0, vx: 0 })); let glitI = 0, glitLast = 0;
+function drawPill(x, y, t, alpha, scale, full) {
+  const P = pillSprites();
+  const bob = REDUCED || !full ? 0 : Math.sin(t / 260) * 5;
+  y += bob;
+  if (full && !REDUCED && t - glitLast > 45) { const g = GLIT[glitI++ % GLIT.length]; g.x = x + rand(-10, 10); g.y = y + rand(-6, 6); g.t = t; g.c = (glitI % 5); g.vx = rand(-12, 12); glitLast = t; }
+  if (full && !REDUCED) for (const g of GLIT) { const age = t - g.t; if (age > 900) continue; const k = age / 900;
+    ctx.globalAlpha = alpha * (1 - k); star(g.x + g.vx * k, g.y - 12 * k, 4 * (1 - k * 0.5), SPARK_COLS[g.c]); }
+  ctx.save(); ctx.translate(x, y); ctx.globalAlpha = alpha;
+  if (full) {
+    const pulse = REDUCED ? 1 : 1 + 0.12 * Math.sin(t / 150);
+    ctx.save(); ctx.rotate(REDUCED ? 0 : t / 1400); ctx.globalAlpha = alpha * 0.7; ctx.drawImage(P.rays, -P.R2, -P.R2); ctx.restore();
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; const hs = P.R3 * pulse; ctx.drawImage(P.halo, -hs, -hs, hs * 2, hs * 2); ctx.restore();
+  }
+  ctx.rotate(REDUCED ? -0.35 : Math.sin(t / 420) * 0.35 - 0.3); ctx.scale(scale * 1.45, scale * 1.45);
+  ctx.drawImage(P.cap, -P.cw / 2, -P.ch / 2, P.cw, P.ch);
+  if (!REDUCED) { // holographic shimmer sweep across the capsule
+    const k = (t / 1100) % 1, sx = -P.L - P.r + k * (2 * P.L + 2 * P.r) * 1.4;
+    ctx.save(); P.body(ctx); ctx.clip(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = alpha * 0.55;
+    ctx.fillStyle = `hsl(${(t / 4) % 360},100%,70%)`; ctx.beginPath(); ctx.moveTo(sx, -P.r); ctx.lineTo(sx + 9, -P.r); ctx.lineTo(sx - 1, P.r); ctx.lineTo(sx - 10, P.r); ctx.closePath(); ctx.fill(); ctx.restore();
+  }
+  ctx.restore(); ctx.globalAlpha = 1;
+  if (full && alpha > 0.5) { ctx.lineWidth = 1.5; ctx.strokeStyle = '#111';
+    for (let i = 0; i < 5; i++) { const a = (REDUCED ? 0 : t / 380) + i * 1.2566, rr = 36 + (REDUCED ? 0 : 5 * Math.sin(t / 110 + i)), s = 6 + (REDUCED ? 0 : 2 * Math.sin(t / 90 + i * 2));
+      star(x + Math.cos(a) * rr, y + Math.sin(a) * rr * 0.8, s, SPARK_COLS[i]); } }
+}
+// grab payoff: shockwave rings + sparkle burst where the pill was swallowed
+const BURSTS = [];
+function drawBursts(t) {
+  for (let i = BURSTS.length - 1; i >= 0; i--) {
+    const b = BURSTS[i], k = (t - b.t) / 700; if (k >= 1) { BURSTS.splice(i, 1); continue; }
+    ctx.save(); ctx.translate(b.x, b.y); ctx.globalAlpha = 1 - k;
+    for (let j = 0; j < (REDUCED ? 1 : 2); j++) { const kk = clamp(k * 1.3 - j * 0.2, 0, 1); ctx.lineWidth = 8 * (1 - kk) + 1; ctx.strokeStyle = j ? '#FF2E88' : '#00E5FF';
+      ctx.beginPath(); ctx.arc(0, 0, 20 + (REDUCED ? 60 : kk * 150), 0, 7); ctx.stroke(); }
+    if (!REDUCED) for (let j = 0; j < 14; j++) { const a = j * 0.4488 + b.r, d = 20 + k * 170; star(Math.cos(a) * d, Math.sin(a) * d, 9 * (1 - k) + 2, SPARK_COLS[j % 5]); }
+    ctx.restore();
+  }
+}
+// off-screen pointer to the pill, drawn in screen space
+function drawPillArrow(pill, t) {
+  const sx = (pill.x - cam.x) * cam.z + VW / 2, sy = (pill.y - cam.y) * cam.z + VH / 2, m = 46;
+  if (sx > 0 && sx < VW && sy > 0 && sy < VH) return;
+  const cx = VW / 2, cy = VH / 2, dx = sx - cx, dy = sy - cy, sc = Math.min((VW / 2 - m) / Math.abs(dx || 1e-6), (VH / 2 - m) / Math.abs(dy || 1e-6));
+  const ax = cx + dx * sc, ay = cy + dy * sc, ang = Math.atan2(dy, dx), pul = REDUCED ? 1 : 1 + 0.12 * Math.sin(t / 120);
+  ctx.save(); ctx.translate(ax, ay); ctx.scale(pul, pul);
+  ctx.fillStyle = 'rgba(255,230,0,.35)'; ctx.beginPath(); ctx.arc(0, 0, 30, 0, 7); ctx.fill();
+  ctx.save(); ctx.rotate(ang); ctx.fillStyle = '#FFE600'; ctx.strokeStyle = '#111'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(36, 0); ctx.lineTo(18, -13); ctx.lineTo(18, 13); ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.restore();
+  const P = pillSprites(); ctx.rotate(-0.3); ctx.drawImage(P.cap, -P.cw * 0.6, -P.ch * 0.6, P.cw * 1.2, P.ch * 1.2);
   ctx.restore();
-  if (!REDUCED && alpha > 0.5) for (let i = 0; i < 3; i++) { const a = t / 260 + i * 2.1, rr = 24 + 4 * Math.sin(t / 100 + i), s = 5;
-    const cx = x + Math.cos(a) * rr, cy = y + Math.sin(a) * rr; ctx.fillStyle = '#FFE600'; ctx.strokeStyle = '#111'; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.moveTo(cx, cy - s); ctx.lineTo(cx + s * 0.3, cy); ctx.lineTo(cx, cy + s); ctx.lineTo(cx - s * 0.3, cy); ctx.closePath(); ctx.fill(); ctx.stroke(); }
+}
+// tank-wide alert when a new pill appears (works for host + clients, and late joiners)
+let lastPillId = -1;
+function pillAlert(id) {
+  if (id === lastPillId) return; lastPillId = id;
+  const el2 = $('#pillAlert'); el2.hidden = false; el2.classList.remove('go'); void el2.offsetWidth; el2.classList.add('go');
+  const fl = $('#pillFlash'); if (!REDUCED) { fl.classList.remove('go'); void fl.offsetWidth; fl.classList.add('go'); }
+  clearTimeout(pillAlert.t); pillAlert.t = setTimeout(() => { el2.hidden = true; }, 2400);
 }
 // chomp: cartoon red splat bursting out + a few bubbles + "CHOMP!", gone within ~1.5 s
 const SPLAT_MS = 1500;
