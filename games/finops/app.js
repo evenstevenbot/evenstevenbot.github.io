@@ -14,10 +14,13 @@ const MAX_PLAYERS = 20;
 const WORLD_W = 2000, WORLD_H = 1250, SAND_H = 70;
 const FISH_LEN = 110, FISH_HT = FISH_LEN * 208 / 268;
 const MAX_SIZE = 2.6, GROW = 1.1;
-const TICK_MS = 33, SNAP_EVERY = 2, INTERP_MS = 100;
-const FOOD_R = 9;
-const FOOD_RATE = { low: 1.1, med: 2.1, high: 3.6 };   // flakes / second (scaled by player count)
-const DEFAULTS = { mode: 'timer', min: 1, goal: 20, food: 'med' };
+const TICK_MS = 33, SNAP_EVERY = 2, INTERP_MAX = 150, INTERP_MIN = 50, HOST_INTERP = 45;
+const FOOD_R = 9, PILL_R = 13;
+// flakes / second (scaled by player count). Round 2: 20% less food at every level (was 1.1 / 2.1 / 3.6).
+const FOOD_RATE = { low: 0.88, med: 1.68, high: 2.88 };
+const DEFAULTS = { mode: 'timer', min: 1, goal: 20, food: 'med', pw: true };
+// Magic pill power-up: one at a time, every 25-40 s at random; powered fish is 2x with metal jaws for up to 15 s.
+const PILL_GAP = [25000, 40000], PW_MS = 15000, PW_WARN = 3000;
 const NAME_KEY = 'finops-name', FISH_KEY = 'finops-fish';
 
 // ICE: same STUN + Metered TURN config as /tools/pokerplanning (TURN covers UDP-blocking networks).
@@ -34,6 +37,9 @@ const QS = new URLSearchParams(location.search);
 const LOCAL_BUS = IS_LOCAL && QS.has('local');
 const peerOpts = { debug: 0, config: { iceServers: STUN_SERVERS.concat(TURN_SERVERS) } };
 const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
+// Mouse steering is off by default (keyboard only); touch steering stays on so phones are playable. ?mouse=1 re-enables it.
+const MOUSE_ON = QS.get('mouse') === '1';
+const TOUCH = matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -65,18 +71,19 @@ class LocalPeer extends Emitter {
     if (m.k === 'who') { if (m.id === this.id && this.opened) this.bc.postMessage({ k: 'iam', to: m.from }); return; }
     if (m.k === 'iam' && m.to === this.id + ':probe') { this.taken = true; return; }
     if (m.to !== this.id) return;
-    if (m.k === 'open') { const c = this.mk(m.from); this.bc.postMessage({ k: 'ack', to: m.from, from: this.id }); this.emit('connection', c); setTimeout(() => { c.open = true; c.emit('open'); }, 0); }
-    else if (m.k === 'ack') { const c = this.conns[m.from]; if (c && !c.open) { c.open = true; clearTimeout(c.t); c.emit('open'); } }
-    else if (m.k === 'd') { const c = this.conns[m.from]; if (c) c.emit('data', m.d); }
-    else if (m.k === 'x') { const c = this.conns[m.from]; if (c) { delete this.conns[m.from]; c.emit('close'); } }
+    const key = m.from + '|' + (m.l || '');
+    if (m.k === 'open') { const c = this.mk(m.from, m.l); this.bc.postMessage({ k: 'ack', to: m.from, from: this.id, l: m.l }); this.emit('connection', c); setTimeout(() => { c.open = true; c.emit('open'); }, 0); }
+    else if (m.k === 'ack') { const c = this.conns[key]; if (c && !c.open) { c.open = true; clearTimeout(c.t); c.emit('open'); } }
+    else if (m.k === 'd') { const c = this.conns[key]; if (c) c.emit('data', m.d); }
+    else if (m.k === 'x') { const c = this.conns[key]; if (c) { delete this.conns[key]; c.emit('close'); } }
   }
-  mk(other) {
-    const c = new Emitter(); c.peer = other; c.open = false;
-    c.send = (d) => { if (!this.destroyed) this.bc.postMessage({ k: 'd', to: other, from: this.id, d }); };
-    c.close = () => { if (this.conns[other]) { delete this.conns[other]; this.bc.postMessage({ k: 'x', to: other, from: this.id }); } };
-    this.conns[other] = c; return c;
+  mk(other, l = '') {
+    const c = new Emitter(); c.peer = other; c.open = false; c.label = l; const key = other + '|' + l;
+    c.send = (d) => { if (!this.destroyed) this.bc.postMessage({ k: 'd', to: other, from: this.id, l, d }); };
+    c.close = () => { if (this.conns[key]) { delete this.conns[key]; this.bc.postMessage({ k: 'x', to: other, from: this.id, l }); } };
+    this.conns[key] = c; return c;
   }
-  connect(id) { const c = this.mk(id); this.bc.postMessage({ k: 'open', to: id, from: this.id }); c.t = setTimeout(() => this.emit('error', { type: 'peer-unavailable' }), 2500); return c; }
+  connect(id, o = {}) { const l = o.label || ''; const c = this.mk(id, l); this.bc.postMessage({ k: 'open', to: id, from: this.id, l }); c.t = setTimeout(() => { if (!l) this.emit('error', { type: 'peer-unavailable' }); }, 2500); return c; }
   destroy() { if (this.destroyed) return; Object.values(this.conns).forEach((c) => c.close()); this.destroyed = true; this.bc.close(); }
 }
 // The probe trick above needs the owner to answer; mark opened once claim succeeds.
@@ -87,15 +94,17 @@ const makePeer = (id) => {
 
 /* ---------------- state ---------------- */
 let peer = null, role = null, room = '', myId = null, hostConn = null, joined = false, leaving = false;
-let lastHostMsg = 0;
+let lastHostMsg = 0, uConn = null;
 const H = { // host-only state
-  conns: new Map(),   // pid -> {c, lastSeen}
+  conns: new Map(),   // pid -> {c, u, lastSeen}  (c = reliable/ordered channel, u = unordered channel for snapshots + input)
+  byPeer: new Map(),  // peer id -> pid
   players: new Map(), // pid -> player
   foods: [], nextFood: 1, nextPid: 1, set: { ...DEFAULTS }, ph: 'lobby', cdEnd: 0, playStart: 0,
-  ev: [], tick: 0, spawnAcc: 0, metaVer: 0, result: null, timer: null, lastT: 0,
+  ev: [], tick: 0, spawnAcc: 0, metaVer: 0, result: null, timer: null, lastT: 0, pill: null, nextPill: 0,
 };
 // client view state
-const V = { meta: { pl: {}, set: { ...DEFAULTS }, ph: 'lobby', host: 0, n: 0 }, snaps: [], fish: new Map(), eats: [], fx: [], ph: 'lobby', tl: 0, cd: 0, result: null };
+const V = { meta: { pl: {}, set: { ...DEFAULTS }, ph: 'lobby', host: 0, n: 0 }, snaps: [], fish: new Map(), eats: [], fx: [], souls: [], ph: 'lobby', tl: 0, cd: 0, result: null,
+  seq: -1, lastAt: 0, gapM: 66, gapD: 8, idelay: 100, rtt: 0, pill: null };
 
 /* ---------------- host: sim ---------------- */
 function hostPlayerList() { return [...H.players.values()]; }
@@ -104,7 +113,7 @@ function spawnPos(bottom) {
 }
 function addPlayer(pid, info) {
   const late = H.ph === 'countdown' || H.ph === 'play';
-  const p = { id: pid, name: info.name, sp: info.sp, c: info.c, ready: false, score: 0, eats: 0, size: 1, ...spawnPos(late), vx: 0, vy: 0, ax: 0, ay: 0, f: 1, a: 0, lastScore: 0 };
+  const p = { id: pid, name: info.name, sp: info.sp, c: info.c, ready: false, score: 0, eats: 0, size: 1, base: 1, pw: 0, out: false, ...spawnPos(late), vx: 0, vy: 0, ax: 0, ay: 0, f: 1, a: 0, lastScore: 0, inQ: -1 };
   H.players.set(pid, p); bumpMeta();
   return p;
 }
@@ -117,10 +126,15 @@ function metaMsg() {
 }
 function broadcastMeta() { const m = metaMsg(); sendAll(m); onClientData(m); }
 function sendAll(m) { for (const { c } of H.conns.values()) if (c.open) try { c.send(m); } catch {} }
+function sendSnap(m) { for (const e of H.conns.values()) { const ch = e.u && e.u.open ? e.u : e.c; if (ch.open) try { ch.send(m); } catch {} } }
+function fxAll(m) { m.t = 'fx'; sendAll(m); onClientData(m); } // reliable one-off effects (pill swallowed, chomp, power ended)
 
 function resetRound() {
-  for (const p of H.players.values()) { p.score = 0; p.eats = 0; p.size = 1; p.lastScore = 0; }
-  H.foods = []; H.result = null;
+  for (const p of H.players.values()) {
+    if (p.out) Object.assign(p, spawnPos(false), { vx: 0, vy: 0 }); // eaten fish respawn for the new round
+    p.score = 0; p.eats = 0; p.size = 1; p.base = 1; p.pw = 0; p.out = false; p.lastScore = 0;
+  }
+  H.foods = []; H.result = null; H.pill = null; H.endAt = 0; H.nextPill = 0;
 }
 function hostStart() {
   if (role !== 'host' || H.players.size === 0) return;
@@ -133,9 +147,11 @@ function hostToLobby() {
   H.ph = 'lobby'; bumpMeta();
 }
 function hostEnd() {
+  // Everyone is ranked by score, including eaten fish (their score is locked in when they're eaten).
   const ranked = hostPlayerList().sort((a, b) => b.score - a.score || a.lastScore - b.lastScore);
-  H.result = ranked.map((p) => [p.id, p.score]);
-  H.ph = 'end'; H.foods = []; bumpMeta();
+  H.result = ranked.map((p) => [p.id, p.score, p.out ? 1 : 0]);
+  for (const p of H.players.values()) if (p.pw) { p.pw = 0; p.size = p.base; }
+  H.ph = 'end'; H.foods = []; H.pill = null; bumpMeta();
 }
 function timeLeft() {
   if (H.ph !== 'play' || H.set.mode !== 'timer') return H.set.min * 60000;
@@ -164,6 +180,46 @@ function inSuction(p, m, f) {
   const fc = faceOf(p); return (dx * fc.x + dy * fc.y) / (d || 1) >= SUCK_COS;
 }
 
+// Fish movement shared by the host simulation and the client's own-fish prediction (same numbers on both sides).
+function moveFish(p, dt) {
+  const mag = Math.hypot(p.ax, p.ay); let ax = p.ax, ay = p.ay; if (mag > 1) { ax /= mag; ay /= mag; }
+  const maxV = 340 / Math.pow(p.base || p.size, 0.3), acc = 1100;
+  p.vx += ax * acc * dt; p.vy += ay * acc * dt;
+  const drag = Math.exp(-(mag > 0.05 ? 1.6 : 3.2) * dt); p.vx *= drag; p.vy *= drag;
+  const sp = Math.hypot(p.vx, p.vy); if (sp > maxV) { p.vx *= maxV / sp; p.vy *= maxV / sp; }
+  p.x += p.vx * dt; p.y += p.vy * dt;
+  if (p.vx > 25) p.f = 1; else if (p.vx < -25) p.f = -1;
+  const tilt = clamp(Math.atan2(p.vy, Math.abs(p.vx) + 60) * 0.7, -0.55, 0.55) * p.f;
+  p.a += (tilt - p.a) * Math.min(1, dt * 8);
+}
+function wallFish(p) {
+  const r = radiusOf(p.size);
+  if (p.x < r) { p.x = r; p.vx = Math.abs(p.vx) * 0.5; } if (p.x > WORLD_W - r) { p.x = WORLD_W - r; p.vx = -Math.abs(p.vx) * 0.5; }
+  const top = r * 0.8 + 10, bot = WORLD_H - SAND_H + 10 - r * 0.8;
+  if (p.y < top) { p.y = top; p.vy = Math.abs(p.vy) * 0.5; } if (p.y > bot) { p.y = bot; p.vy = -Math.abs(p.vy) * 0.5; }
+}
+// falling + fluttering + shy of nearby mouths (flakes and the pill)
+function moveFlake(f, dt, mouths, shy = 1) {
+  f.t += dt; f.dart -= dt;
+  if (f.dart <= 0) { f.dart = rand(0.5, 1.6); f.dvx = rand(-1, 1) * rand(60, 140) * shy; }
+  f.dvx *= Math.exp(-2.5 * dt);
+  let ev = 0, evy = 0;
+  for (const [, m] of mouths) {
+    const dx = f.x - m.x, dy = f.y - m.y, d = Math.hypot(dx, dy);
+    if (d < 95 * shy && d > 40) { const k = (1 - d / (95 * shy)) * 120 * shy; ev += dx / d * k; evy += dy / d * k * 0.4; }
+  }
+  f.x += (f.drift + f.dvx + ev + Math.cos(f.t * f.wf + f.ph) * f.wob * f.wf * 0.5) * dt;
+  f.y += (f.vy + evy) * dt;
+  f.x = clamp(f.x, 15, WORLD_W - 15);
+  if (f.y > WORLD_H - SAND_H + 5) f.fade -= dt * 1.5;
+}
+function spawnPill() {
+  H.pill = { id: H.nextFood++, x: rand(160, WORLD_W - 160), y: -20, vy: rand(55, 80), drift: rand(-20, 20),
+    wob: rand(30, 60), wf: rand(1.2, 2.4), ph: rand(0, 6.28), dart: rand(0.4, 1.2), dvx: 0, fade: 1, t: 0 };
+}
+const pillGap = () => rand(PILL_GAP[0], PILL_GAP[1]);
+function powerUp(p) { p.pw = Date.now() + PW_MS; p.size = p.base * 2; fxAll({ k: 'pill', pid: p.id }); }
+function powerDown(p, why) { if (!p.pw) return; p.pw = 0; p.size = p.base; fxAll({ k: 'unpw', pid: p.id, why }); }
 function spawnFood() {
   const gold = Math.random() < 0.2;
   const fast = Math.random() < 0.3;
@@ -177,20 +233,13 @@ function hostTick() {
   const t = now(); const dt = Math.min(0.08, (t - (H.lastT || t)) / 1000) || TICK_MS / 1000; H.lastT = t;
   // phase transitions
   if (H.ph === 'countdown' && Date.now() >= H.cdEnd) { H.ph = 'play'; H.playStart = Date.now(); H.spawnAcc = 2; bumpMeta(); }
-  const players = hostPlayerList();
+  if (H.ph === 'play' && !H.nextPill) H.nextPill = Date.now() + pillGap();
+  const all = hostPlayerList(), players = all.filter((p) => !p.out); // eaten fish are out of the water
   // fish movement
   const nowMs = Date.now();
   for (const p of players) {
     if (p.id !== 0 && nowMs - (p.inAt || 0) > INPUT_TIMEOUT_MS) { p.ax = 0; p.ay = 0; } // stalled client: stop steering, drag glides it to a stop
-    const mag = Math.hypot(p.ax, p.ay); let ax = p.ax, ay = p.ay; if (mag > 1) { ax /= mag; ay /= mag; }
-    const maxV = 340 / Math.pow(p.size, 0.3), acc = 1100;
-    p.vx += ax * acc * dt; p.vy += ay * acc * dt;
-    const drag = Math.exp(-(mag > 0.05 ? 1.6 : 3.2) * dt); p.vx *= drag; p.vy *= drag;
-    const sp = Math.hypot(p.vx, p.vy); if (sp > maxV) { p.vx *= maxV / sp; p.vy *= maxV / sp; }
-    p.x += p.vx * dt; p.y += p.vy * dt;
-    if (p.vx > 25) p.f = 1; else if (p.vx < -25) p.f = -1;
-    const tilt = clamp(Math.atan2(p.vy, Math.abs(p.vx) + 60) * 0.7, -0.55, 0.55) * p.f;
-    p.a += (tilt - p.a) * Math.min(1, dt * 8);
+    moveFish(p, dt);
   }
   // fish-fish collisions: mass ~ size^2, elastic-ish impulses so you can shove others
   for (let i = 0; i < players.length; i++) for (let j = i + 1; j < players.length; j++) {
@@ -207,12 +256,7 @@ function hostTick() {
       a.vx -= J / ma * nx; a.vy -= J / ma * ny; b.vx += J / mb * nx; b.vy += J / mb * ny;
     }
   }
-  for (const p of players) {
-    const r = radiusOf(p.size);
-    if (p.x < r) { p.x = r; p.vx = Math.abs(p.vx) * 0.5; } if (p.x > WORLD_W - r) { p.x = WORLD_W - r; p.vx = -Math.abs(p.vx) * 0.5; }
-    const top = r * 0.8 + 10, bot = WORLD_H - SAND_H + 10 - r * 0.8;
-    if (p.y < top) { p.y = top; p.vy = Math.abs(p.vy) * 0.5; } if (p.y > bot) { p.y = bot; p.vy = -Math.abs(p.vy) * 0.5; }
-  }
+  for (const p of players) wallFish(p);
   // food
   if (H.ph === 'play') {
     const rate = FOOD_RATE[H.set.food] * (1 + 0.12 * (players.length - 1));
@@ -224,43 +268,74 @@ function hostTick() {
         if (!p || age >= CAP_MS) { f.fade = -1; continue; }
         const m = mouthOf(p), k = age / CAP_MS; f.x += (m.x - f.x) * k; f.y += (m.y - f.y) * k; continue;
       }
-      f.t += dt; f.dart -= dt;
-      if (f.dart <= 0) { f.dart = rand(0.5, 1.6); f.dvx = rand(-1, 1) * rand(60, 140); } // flutter
-      f.dvx *= Math.exp(-2.5 * dt);
-      let ev = 0, evy = 0;
-      for (const [, m] of mouths) { // shy flakes: slip away from mouths that come close
-        const dx = f.x - m.x, dy = f.y - m.y, d = Math.hypot(dx, dy);
-        if (d < 95 && d > 40) { const k = (1 - d / 95) * 120; ev += dx / d * k; evy += dy / d * k * 0.4; }
-      }
-      f.x += (f.drift + f.dvx + ev + Math.cos(f.t * f.wf + f.ph) * f.wob * f.wf * 0.5) * dt;
-      f.y += (f.vy + evy) * dt;
-      f.x = clamp(f.x, 15, WORLD_W - 15);
-      if (f.y > WORLD_H - SAND_H + 5) f.fade -= dt * 1.5;
+      moveFlake(f, dt, mouths);
       if (f.fade > 0 && f.y > 0) for (const [p, m] of mouths) {
         if (inSuction(p, m, f)) {
-          f.capd = true; f.cap = p.id; f.capAt = Date.now(); p.score += f.k; p.eats++; p.size = Math.min(MAX_SIZE, p.size * GROW); p.lastScore = Date.now();
-          H.ev.push([f.id, p.id, Math.round(f.x), Math.round(f.y), f.k]); break;
+          f.capd = true; f.cap = p.id; f.capAt = Date.now(); p.score += f.k; p.eats++; p.lastScore = Date.now();
+          p.base = Math.min(MAX_SIZE, p.base * GROW); p.size = p.base * (p.pw ? 2 : 1);
+          H.ev.push([f.id, p.id, Math.round(f.x), Math.round(f.y), f.k, H.tick]); break;
         }
       }
     }
     H.foods = H.foods.filter((f) => f.fade > 0);
-    // win checks
-    if (H.set.mode === 'timer' && timeLeft() <= 0) hostEnd();
-    else if (H.set.mode === 'goal' && players.some((p) => p.score >= H.set.goal)) hostEnd();
+    // magic pill: host decides spawn, capture and power state
+    const pw = H.set.pw;
+    if (!pw) H.pill = null;
+    if (pw && !H.pill && nowMs >= H.nextPill && !players.some((p) => p.pw)) spawnPill();
+    const pl = H.pill;
+    if (pl) {
+      if (pl.capd) {
+        const p = H.players.get(pl.cap), age = nowMs - pl.capAt;
+        if (!p || p.out || age >= CAP_MS) { H.pill = null; H.nextPill = nowMs + pillGap(); if (p && !p.out) powerUp(p); }
+        else { const m = mouthOf(p), k = age / CAP_MS; pl.x += (m.x - pl.x) * k; pl.y += (m.y - pl.y) * k; }
+      } else {
+        moveFlake(pl, dt, mouths, 1.25);
+        if (pl.fade <= 0) { H.pill = null; H.nextPill = nowMs + pillGap(); }
+        else if (pl.y > 0) for (const [p, m] of mouths) if (!p.pw && inSuction(p, m, pl)) { pl.capd = true; pl.cap = p.id; pl.capAt = nowMs; break; }
+      }
+    }
+    // powered fish: chomp one other fish (mouth touching its body), or wear off after PW_MS
+    for (const p of players) {
+      if (!p.pw || p.out) continue;
+      if (nowMs >= p.pw) { powerDown(p, 'time'); continue; }
+      const m = mouthOf(p), fc = faceOf(p), bx = m.x + fc.x * 6 * p.base, by = m.y + fc.y * 6 * p.base;
+      for (const q of players) {
+        if (q === p || q.out || q.pw) continue; // a powered fish can't be eaten
+        const d = Math.hypot(q.x - bx, (q.y - by) * 1.25);
+        if (d < radiusOf(q.size) + 8) {
+          q.out = true; q.ax = q.ay = 0; q.vx = q.vy = 0;
+          fxAll({ k: 'chomp', a: p.id, b: q.id, x: Math.round(q.x), y: Math.round(q.y), f: q.f, s: +q.size.toFixed(3), sc: q.score });
+          powerDown(p, 'ate');
+          break;
+        }
+      }
+    }
+    // win checks. If eating leaves only one fish swimming, the round ends early; winner = highest score
+    // (eaten fish keep their locked-in score).
+    const swimming = players.filter((p) => !p.out);
+    if (all.length >= 2 && swimming.length <= 1 && all.some((p) => p.out)) { if (!H.endAt) H.endAt = nowMs + 2600; if (nowMs >= H.endAt) hostEnd(); } // let the soul float away first
+    else if (H.set.mode === 'timer' && timeLeft() <= 0) hostEnd();
+    else if (H.set.mode === 'goal' && swimming.some((p) => p.score >= H.set.goal)) hostEnd();
   }
   // drop silent clients
   const cut = Date.now() - 9000;
   for (const [pid, e] of H.conns) if (e.lastSeen < cut) { try { e.c.close(); } catch {} dropClient(pid); }
   // snapshots
   H.tick++;
-  const snap = { t: 's', ph: H.ph, tl: timeLeft(), cd: H.ph === 'countdown' ? Math.max(0, H.cdEnd - Date.now()) : 0,
-    p: players.map((p) => [p.id, Math.round(p.x), Math.round(p.y), +p.size.toFixed(3), p.score, p.f, +p.a.toFixed(2), Math.round(p.vx), Math.round(p.vy)]),
-    fd: H.foods.map((f) => [f.id, Math.round(f.x), Math.round(f.y), f.k, +f.fade.toFixed(2), f.capd ? f.cap + 1 : 0, f.capd ? Date.now() - f.capAt : 0]), ev: H.ev };
+  const pl = H.pill;
+  // compact snapshot; eat events ride along in the next 3 snapshots so a lost/reordered packet can't drop one
+  H.ev = H.ev.filter((e) => H.tick - e[5] <= SNAP_EVERY * 3);
+  const snap = { t: 's', n: H.tick, ph: H.ph, tl: timeLeft(), cd: H.ph === 'countdown' ? Math.max(0, H.cdEnd - Date.now()) : 0,
+    p: all.map((p) => [p.id, Math.round(p.x), Math.round(p.y), +p.size.toFixed(3), p.score, p.f, +p.a.toFixed(2), Math.round(p.vx), Math.round(p.vy), p.out ? 1 : 0, p.pw ? Math.max(1, p.pw - nowMs) : 0]),
+    fd: H.foods.map((f) => [f.id, Math.round(f.x), Math.round(f.y), f.k, +f.fade.toFixed(2), f.capd ? f.cap + 1 : 0, f.capd ? Date.now() - f.capAt : 0]),
+    pl: pl ? [pl.id, Math.round(pl.x), Math.round(pl.y), +pl.fade.toFixed(2), pl.capd ? pl.cap + 1 : 0, pl.capd ? nowMs - pl.capAt : 0] : 0,
+    ev: H.ev.map((e) => e.slice(0, 5)) };
   onClientData(snap);
-  if (H.tick % SNAP_EVERY === 0) { sendAll(snap); H.ev = []; }
+  if (H.tick % SNAP_EVERY === 0) sendSnap(snap);
 }
 
 function dropClient(pid) {
+  const e = H.conns.get(pid); if (e) { if (e.u) try { e.u.close(); } catch {} H.byPeer.delete(e.c.peer); }
   H.conns.delete(pid);
   if (H.players.delete(pid)) bumpMeta();
 }
@@ -278,15 +353,21 @@ function hostHandle(pid, d) {
       addPlayer(pid, { name, sp, c }); e.c.send({ t: 'welcome', id: pid });
       break;
     }
-    case 'in': if (p) { p.ax = clamp(+d.x || 0, -1, 1); p.ay = clamp(+d.y || 0, -1, 1); p.inAt = Date.now(); } break;
+    case 'in': if (p) { const q = +d.q || 0; if (q && q <= p.inQ) break; p.inQ = q; p.ax = clamp(+d.x || 0, -1, 1); p.ay = clamp(+d.y || 0, -1, 1); p.inAt = Date.now(); } break;
+    case 'p': if (d.c != null) try { e.c.send({ t: 'po', c: d.c }); } catch {} break;
     case 'ready': if (p) { p.ready = !!d.v; bumpMeta(); } break;
     case 'bye': try { e.c.close(); } catch {} dropClient(pid); break;
   }
 }
 function onHostConnection(c) {
+  if (c.label === 'u') { // second, unordered channel from an already-connected player
+    c.on('open', () => { const pid = H.byPeer.get(c.peer), e = pid != null && H.conns.get(pid); if (!e) { try { c.close(); } catch {} return; } e.u = c;
+      c.on('data', (d) => hostHandle(pid, d)); c.on('close', () => { if (e.u === c) e.u = null; }); });
+    c.on('error', () => {}); return;
+  }
   const pid = H.nextPid++;
-  const ent = { c, lastSeen: Date.now() };
-  H.conns.set(pid, ent);
+  const ent = { c, u: null, lastSeen: Date.now() };
+  H.conns.set(pid, ent); H.byPeer.set(c.peer, pid);
   c.on('open', () => { try { c.send({ t: 'hi', you: pid }); c.send(metaMsg()); } catch {} });
   c.on('data', (d) => hostHandle(pid, d));
   c.on('close', () => { if (H.conns.get(pid) === ent) dropClient(pid); });
@@ -300,6 +381,7 @@ function hostSet(patch) {
   if (patch.dmin) s.min = clamp(s.min + patch.dmin, 1, 10);
   if (patch.dgoal) s.goal = clamp(s.goal + patch.dgoal * 5, 5, 100);
   if (patch.food && FOOD_RATE[patch.food]) s.food = patch.food;
+  if (patch.pw != null) { s.pw = !!patch.pw; if (!s.pw) { H.pill = null; for (const p of H.players.values()) powerDown(p, 'off'); } }
   bumpMeta();
 }
 
@@ -334,7 +416,13 @@ function joinRoom(code) {
   p.on('open', () => {
     if (peer !== p) return;
     const c = p.connect(PREFIX + code, { reliable: true, serialization: 'json' }); hostConn = c;
-    c.on('open', () => { if (hostConn !== c) return; lastHostMsg = Date.now(); history.replaceState(null, '', '?room=' + code + (LOCAL_BUS ? '&local=1' : '')); });
+    c.on('open', () => {
+      if (hostConn !== c) return; lastHostMsg = Date.now(); history.replaceState(null, '', '?room=' + code + (LOCAL_BUS ? '&local=1' : ''));
+      // second, unordered channel for snapshots + steering so one late packet doesn't hold up the newer ones behind it
+      try { const u = p.connect(PREFIX + code, { reliable: false, serialization: 'json', label: 'u' });
+        u.on('open', () => { if (hostConn === c) uConn = u; }); u.on('data', (d) => { if (hostConn === c) { lastHostMsg = Date.now(); onClientData(d); } });
+        u.on('close', () => { if (uConn === u) uConn = null; }); u.on('error', () => { if (uConn === u) uConn = null; }); } catch {}
+    });
     c.on('data', (d) => { if (hostConn === c) { lastHostMsg = Date.now(); onClientData(d); } });
     c.on('close', () => { if (hostConn === c) hostLeft(); });
     c.on('error', () => { if (hostConn === c) hostLeft(); });
@@ -347,12 +435,13 @@ function joinRoom(code) {
 }
 function hostLeft() {
   if (leaving || role !== 'client' || !hostConn) return;
-  hostConn = null; destroyPeer();
+  hostConn = null; uConn = null; destroyPeer();
   showMsg('The host left the tank', 'This game ended because the host closed their page. Start a new tank to keep playing.');
 }
 function send(m) {
   if (role === 'host') { if (m.t === 'ready') { const p = H.players.get(0); if (p) { p.ready = !!m.v; bumpMeta(); } } else if (m.t === 'in') { const p = H.players.get(0); if (p) { p.ax = m.x; p.ay = m.y; p.inAt = Date.now(); } } else if (m.t === 'hello') hostHello(m); return; }
-  if (hostConn) try { hostConn.send(m); } catch {}
+  const ch = m.t === 'in' && uConn && uConn.open ? uConn : hostConn;
+  if (ch) try { ch.send(m); } catch {}
 }
 function hostHello(m) {
   if (H.players.has(0)) return;
@@ -360,7 +449,7 @@ function hostHello(m) {
   addPlayer(0, { name: cleanName(m.name) || 'Host', sp: m.sp, c: m.c }); onClientData({ t: 'welcome', id: 0 });
 }
 setInterval(() => { if (role === 'client' && lastHostMsg && hostConn && Date.now() - lastHostMsg > 7000) hostLeft(); }, 1000);
-setInterval(() => { if (role === 'client' && hostConn) send({ t: 'p' }); }, 2000);
+setInterval(() => { if (role === 'client' && hostConn) send({ t: 'p', c: now() }); }, 1000); // keep-alive + round-trip time
 
 /* ---------------- client: messages ---------------- */
 function onClientData(d) {
@@ -374,12 +463,21 @@ function onClientData(d) {
       renderMetaUI(); break;
     }
     case 's': {
-      d.at = now(); V.snaps.push(d); if (V.snaps.length > 8) V.snaps.shift();
+      if (role === 'client') { // unordered channel: drop stale snapshots, track arrival jitter for the interpolation delay
+        if (d.n != null && d.n <= V.seq) break; V.seq = d.n != null ? d.n : V.seq;
+        const t = now(); if (V.lastAt) { const g = Math.min(400, t - V.lastAt); V.gapM += (g - V.gapM) * 0.1; V.gapD += (Math.abs(g - V.gapM) - V.gapD) * 0.1; } V.lastAt = t;
+        V.idelay = clamp(V.gapM + 2.5 * V.gapD + 4, INTERP_MIN, INTERP_MAX);
+      } else V.idelay = HOST_INTERP;
+      d.at = now(); V.snaps.push(d); if (V.snaps.length > 10) V.snaps.shift();
       V.ph = d.ph; V.tl = d.tl; V.cd = d.cd;
       for (const e of d.ev || []) onEat(e);
       for (const f of d.fd || []) if (f[5]) onEat([f[0], f[5] - 1, f[1], f[2], f[3]], f[6]);
+      if (d.pl && d.pl[4]) onEat([d.pl[0], d.pl[4] - 1, d.pl[1], d.pl[2], 3], d.pl[5]);
+      if (role === 'client') reconcile(d);
       break;
     }
+    case 'po': { const r = now() - d.c; if (r >= 0 && r < 5000) V.rtt = V.rtt ? V.rtt + (r - V.rtt) * 0.25 : r; break; }
+    case 'fx': onFx(d); break;
     case 'welcome': myId = d.id; joined = true; showGame(); break;
     case 'taken': $('#pickError').textContent = 'Someone just grabbed that fish. Pick another!'; $('#diveBtn').disabled = false; renderPick(); break;
     case 'full': $('#pickError').textContent = 'This tank is full (20 fish max). Try again later or start your own tank.'; $('#diveBtn').disabled = false; break;
@@ -456,6 +554,7 @@ let cdShownAt = 0;
 function onPhase(prev, ph) {
   if (ph === 'countdown') { $('#countdown').hidden = false; cdShownAt = now(); }
   if (ph === 'play' && prev === 'countdown') popCountdown('FEEDING TIME!', true);
+  else if (ph === 'play') { $('#countdown').hidden = true; cdLast = ''; }
   if (ph !== 'countdown' && ph !== 'play') $('#countdown').hidden = true;
   if (ph === 'end') showEnd(); else $('#endScreen').hidden = true;
   if (ph === 'lobby') { readyLocal = false; }
@@ -466,7 +565,9 @@ function popCountdown(txt, finish) {
   if (txt === cdLast) return; cdLast = txt;
   box.hidden = false; t.textContent = txt; t.className = finish ? 'go' : 'num';
   void t.offsetWidth; t.classList.add('pop');
-  if (finish) setTimeout(() => { if (cdLast === txt) { box.hidden = true; cdLast = ''; } }, 1300);
+  // Always hide after FEEDING TIME. (Bug: on non-host fish a snapshot still saying 'countdown' could arrive just after
+  // the 'play' message and re-pop "1"; this timer then saw cdLast !== txt and never hid it, so the "1" stayed stuck.)
+  if (finish) { clearTimeout(popCountdown.t); popCountdown.t = setTimeout(() => { if (V.meta.ph !== 'countdown') { box.hidden = true; cdLast = ''; } }, 1300); }
 }
 function showEnd() {
   const res = V.result || []; const pl = V.meta.pl || {};
@@ -476,11 +577,11 @@ function showEnd() {
     const r = res[i]; if (!r) continue; const m = pl[r[0]]; if (!m) continue;
     const col = el('div', 'pod pod' + (i + 1));
     const img = el('img', 'pod-fish'); img.src = window.FinFish.urlFor(m[1], m[2]); img.alt = '';
-    col.append(img, el('div', 'pod-name', m[0] + (+r[0] === myId ? ' (you)' : '')), el('div', 'pod-pts', r[1] + ' pts'), el('div', 'pod-block', String(i + 1)));
+    col.append(img, el('div', 'pod-name', (r[2] ? '👻 ' : '') + m[0] + (+r[0] === myId ? ' (you)' : '')), el('div', 'pod-pts', r[1] + ' pts'), el('div', 'pod-block', String(i + 1)));
     pod.append(col);
   }
   const ol = $('#finalList'); ol.textContent = '';
-  res.forEach((r, i) => { const m = pl[r[0]]; if (!m) return; const li = el('li', +r[0] === myId ? 'me' : ''); li.append(el('b', '', '#' + (i + 1)), el('span', '', m[0]), el('em', '', r[1] + ' pts')); ol.append(li); });
+  res.forEach((r, i) => { const m = pl[r[0]]; if (!m) return; const li = el('li', +r[0] === myId ? 'me' : ''); li.append(el('b', '', '#' + (i + 1)), el('span', '', (r[2] ? '👻 ' : '') + m[0] + (r[2] ? ' (eaten)' : '')), el('em', '', r[1] + ' pts')); ol.append(li); });
   const host = role === 'host';
   $('#againBtn').hidden = !host; $('#lobbyBtn').hidden = !host;
   $('#endWait').textContent = host ? '' : 'Waiting for the host to start the next round…';
@@ -495,6 +596,8 @@ function renderMetaUI() {
   $('#menuCode').textContent = room;
   document.querySelectorAll('#modeSeg button').forEach((b) => { b.classList.toggle('on', b.dataset.mode === set.mode); b.disabled = !host; });
   document.querySelectorAll('#foodSeg button').forEach((b) => { b.classList.toggle('on', b.dataset.food === set.food); b.disabled = !host; });
+  const pwOn = set.pw !== false;
+  document.querySelectorAll('#pwSeg button').forEach((b) => { b.classList.toggle('on', (b.dataset.pw === '1') === pwOn); b.disabled = !host; });
   $('#timerVal').textContent = set.min + ' min'; $('#goalVal').textContent = set.goal + ' pts';
   $('#timerStep').classList.toggle('dim', set.mode !== 'timer'); $('#goalStep').classList.toggle('dim', set.mode !== 'goal');
   document.querySelectorAll('.stepper button').forEach((b) => { b.disabled = !host; });
@@ -504,7 +607,7 @@ function renderMetaUI() {
   const inLobby = joined && m.ph === 'lobby';
   $('#lobbyBar').hidden = !inLobby;
   const pl = Object.entries(m.pl || {}); const ready = pl.filter(([, p]) => p[3]).length;
-  $('#readyCount').textContent = `${ready}/${pl.length} ready` + (host ? '' : ' · host starts the game');
+  $('#readyCount').textContent = `${ready}/${pl.length} ready` + (host ? '' : ' · host starts the game') + ` · Power-ups ${set.pw !== false ? 'On ✨' : 'Off'}`;
   const me = m.pl && m.pl[myId]; readyLocal = !!(me && me[3]);
   $('#readyBtn').textContent = readyLocal ? 'Ready! ✓' : "I'm ready"; $('#readyBtn').classList.toggle('on', readyLocal);
   $('#startBtn').hidden = !host; $('#startBtn').classList.toggle('all-ready', pl.length > 0 && ready === pl.length);
@@ -528,11 +631,11 @@ function renderBoard(players) {
       box.append(r); rowEls.set(p.id, r);
     }
     const col = (COLORS.find((c) => c.id === m[2]) || COLORS[0]).hex;
-    r.className = 'row' + (i < 3 ? ' top' + (i + 1) : '') + (p.id === myId ? ' me' : '');
+    r.className = 'row' + (i < 3 ? ' top' + (i + 1) : '') + (p.id === myId ? ' me' : '') + (p.out ? ' out' : '') + (p.pw ? ' pw' : '');
     r.style.transform = `translateY(${i * rowH}px)`; r.style.setProperty('--c', col);
     r.querySelector('.rk').textContent = i + 1;
     const img = r.querySelector('img'), src = window.FinFish.urlFor(m[1], m[2]); if (img.getAttribute('src') !== src) img.src = src;
-    r.querySelector('.nm').textContent = m[0] + (p.id === myId ? ' · YOU' : '');
+    r.querySelector('.nm').textContent = (p.out ? '👻 ' : p.pw ? '💊 ' : '') + m[0] + (p.id === myId ? ' · YOU' : '');
     r.querySelector('.bar i').style.width = Math.min(100, p.score / denom * 100) + '%';
     const pt = r.querySelector('.pt'); if (pt.textContent !== String(p.score)) { pt.textContent = p.score; pt.classList.remove('bump'); void pt.offsetWidth; pt.classList.add('bump'); }
   });
@@ -540,7 +643,7 @@ function renderBoard(players) {
   box.style.height = ranked.length * rowH + 'px';
   const myRank = ranked.findIndex((p) => p.id === myId);
   $('#boardMine').textContent = myRank >= 0 ? `YOU #${myRank + 1} · ${ranked[myRank].score}` : '';
-  $('#boardFoot').textContent = (set.mode === 'goal' ? `FIRST TO ${set.goal} PTS` : `MOST POINTS IN ${set.min} MIN`) + ` · ${ranked.length}/${MAX_PLAYERS} FISH`;
+  $('#boardFoot').textContent = (set.mode === 'goal' ? `FIRST TO ${set.goal} PTS` : `MOST POINTS IN ${set.min} MIN`) + ` · ${ranked.length}/${MAX_PLAYERS} FISH · POWER-UPS ${set.pw !== false ? 'ON' : 'OFF'}`;
 }
 
 /* ---------------- input ---------------- */
@@ -562,14 +665,19 @@ addEventListener('blur', releaseAll);
 document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAll(); });
 addEventListener('pagehide', releaseAll);
 const cv = $('#tank');
+// Mouse steering is off unless ?mouse=1; pen/touch (tap and drag) always steer.
+const usePtr = (e) => e.pointerType !== 'mouse' || MOUSE_ON;
+$('#steerHint').textContent = TOUCH ? 'Tap and drag to swim · arrow keys / WASD on a keyboard' : 'Swim with the arrow keys or WASD' + (MOUSE_ON ? ' (or your mouse)' : '');
 const aim = (e) => { pointer = { x: e.clientX, y: e.clientY, w: screenToWorld(e.clientX, e.clientY) }; pointerKind = e.pointerType; };
-cv.addEventListener('pointermove', (e) => { if (e.pointerType === 'mouse' || pointerDown) aim(e); });
-cv.addEventListener('pointerdown', (e) => { pointerDown = true; aim(e); try { cv.setPointerCapture(e.pointerId); } catch {} closeMenu(); });
-const endPointer = (e) => { pointerDown = false; if (e.pointerType !== 'mouse' || e.type !== 'pointerup') { pointer = null; sendZero(); } };
+cv.addEventListener('pointermove', (e) => { if (usePtr(e) && (e.pointerType === 'mouse' || pointerDown)) aim(e); });
+cv.addEventListener('pointerdown', (e) => { closeMenu(); if (!usePtr(e)) return; pointerDown = true; aim(e); try { cv.setPointerCapture(e.pointerId); } catch {} });
+const endPointer = (e) => { if (!usePtr(e)) return; pointerDown = false; if (e.pointerType !== 'mouse' || e.type !== 'pointerup') { pointer = null; sendZero(); } };
 cv.addEventListener('pointerup', endPointer); cv.addEventListener('pointercancel', endPointer);
-cv.addEventListener('pointerleave', (e) => { if (!pointerDown) { pointer = null; sendZero(); } });
+cv.addEventListener('pointerleave', (e) => { if (usePtr(e) && !pointerDown) { pointer = null; sendZero(); } });
 cv.addEventListener('lostpointercapture', (e) => { if (e.pointerType !== 'mouse') { pointerDown = false; pointer = null; sendZero(); } });
-function sendZero() { if (!joined) return; lastSent = { x: 0, y: 0, at: Date.now() }; try { send({ t: 'in', x: 0, y: 0 }); } catch {} }
+let inQ = 0, myIn = { x: 0, y: 0 };
+function sendIn(x, y) { myIn = { x, y }; lastSent = { x, y, at: Date.now() }; if (role === 'host') { const p = H.players.get(myId); if (p) { p.ax = x; p.ay = y; p.inAt = Date.now(); } return; } try { send({ t: 'in', x, y, q: ++inQ }); } catch {} }
+function sendZero() { if (!joined) return; sendIn(0, 0); }
 function steer(me) {
   let x = 0, y = 0;
   if (keys.has('arrowleft') || keys.has('a')) x -= 1; if (keys.has('arrowright') || keys.has('d')) x += 1;
@@ -581,9 +689,15 @@ function steer(me) {
     if (d > dead) { const k = Math.min(1, (d - dead) / full); x = dx / d * k; y = dy / d * k; }
   }
   x = Math.round(x * 20) / 20; y = Math.round(y * 20) / 20;
+  if (me && me.out) x = y = 0;
+  myIn = { x, y };
+  // send on change (at most every 30 ms) plus a 250 ms heartbeat; seq numbers let the host ignore reordered inputs
   const t = Date.now();
-  if (x !== lastSent.x || y !== lastSent.y ? t - lastSent.at > 45 : t - lastSent.at > 500) { lastSent = { x, y, at: t }; send({ t: 'in', x, y }); }
+  if (x !== lastSent.x || y !== lastSent.y ? t - lastSent.at > 30 : t - lastSent.at > 250) sendIn(x, y);
 }
+// immediate send on key changes so the first frame of a keypress isn't lost waiting for the next animation frame
+addEventListener('keydown', (e) => { if (joined && STEER_KEYS.includes(e.key.toLowerCase()) && !e.repeat && !isTyping(e.target)) steer(V.lastMe); });
+addEventListener('keyup', (e) => { if (joined && STEER_KEYS.includes(e.key.toLowerCase())) steer(V.lastMe); });
 
 /* ---------------- render ---------------- */
 const ctx = cv.getContext('2d');
@@ -601,21 +715,75 @@ function dots() {
   g.fillStyle = 'rgba(255,255,255,.13)'; g.beginPath(); g.arc(7, 7, 2.2, 0, 7); g.fill(); dotPat = ctx.createPattern(c, 'repeat'); return dotPat;
 }
 
+// Others are drawn slightly in the past (adaptive delay from snapshot jitter, ~50-150 ms on clients, 45 ms on the host),
+// with up to 100 ms of extrapolation if snapshots are late. Your own fish is drawn from local prediction (clients)
+// or the live simulation (host), so it reacts to your keys immediately.
 function interp() {
   const s = V.snaps; if (!s.length) return null;
-  const rt = now() - INTERP_MS;
-  let a = s[0], b = s[0];
+  const rt = now() - V.idelay;
+  let a = s[0], b = s[0], ex = 0;
   for (let i = 0; i < s.length - 1; i++) if (s[i].at <= rt && s[i + 1].at >= rt) { a = s[i]; b = s[i + 1]; break; }
-  if (rt > s[s.length - 1].at) { a = b = s[s.length - 1]; }
+  if (rt > s[s.length - 1].at) { a = b = s[s.length - 1]; ex = Math.min(100, rt - b.at) / 1000; }
   const k = b === a ? 1 : clamp((rt - a.at) / (b.at - a.at), 0, 1);
   const am = new Map(a.p.map((p) => [p[0], p]));
   const players = b.p.map((pb) => {
     const pa = am.get(pb[0]) || pb;
-    return { id: pb[0], x: pa[1] + (pb[1] - pa[1]) * k, y: pa[2] + (pb[2] - pa[2]) * k, size: pb[3], score: pb[4], f: pb[5], a: pa[6] + (pb[6] - pa[6]) * k, vx: pb[7], vy: pb[8] };
+    return { id: pb[0], x: pa[1] + (pb[1] - pa[1]) * k + pb[7] * ex, y: pa[2] + (pb[2] - pa[2]) * k + pb[8] * ex, size: pb[3], score: pb[4], f: pb[5], a: pa[6] + (pb[6] - pa[6]) * k, vx: pb[7], vy: pb[8], out: !!pb[9], pw: pb[10] || 0 };
   });
+  // own fish
+  const mine = players.find((p) => p.id === myId), last = s[s.length - 1].p.find((p) => p[0] === myId);
+  if (mine && !mine.out) {
+    if (role === 'host') { const h = H.players.get(myId); if (h) Object.assign(mine, { x: h.x, y: h.y, f: h.f, a: h.a, vx: h.vx, vy: h.vy, size: h.size, score: h.score }); }
+    else if (pred.ok) { Object.assign(mine, { x: pred.x, y: pred.y, f: pred.f, a: pred.a, vx: pred.vx, vy: pred.vy }); if (last) { mine.size = last[3]; mine.score = last[4]; mine.pw = last[10] || 0; } }
+  }
   const af = new Map(a.fd.map((f) => [f[0], f]));
   const foods = b.fd.map((fb) => { const fa = af.get(fb[0]) || fb; return { id: fb[0], x: fa[1] + (fb[1] - fa[1]) * k, y: fa[2] + (fb[2] - fa[2]) * k, k: fb[3], fade: fb[4] }; });
-  return { players, foods };
+  let pill = null;
+  if (b.pl && !b.pl[4]) { const pa = a.pl && a.pl[0] === b.pl[0] ? a.pl : b.pl; pill = { id: b.pl[0], x: pa[1] + (b.pl[1] - pa[1]) * k, y: pa[2] + (b.pl[2] - pa[2]) * k, fade: b.pl[3] }; }
+  return { players, foods, pill };
+}
+/* client-side prediction of your own fish, softly reconciled with the host */
+const pred = { ok: false, x: 0, y: 0, vx: 0, vy: 0, ax: 0, ay: 0, f: 1, a: 0, size: 1, base: 1, hist: [], cx: 0, cy: 0, snaps: 0, errs: [] };
+const SNAP_ERR = 220;
+function reconcile(d) {
+  const e = d.p.find((p) => p[0] === myId);
+  if (!e || e[9]) { pred.ok = false; return; }
+  pred.size = e[3]; pred.base = e[10] ? e[3] / 2 : e[3];
+  if (!pred.ok) { Object.assign(pred, { ok: true, x: e[1], y: e[2], vx: e[7], vy: e[8], f: e[5], a: e[6], hist: [], cx: 0, cy: 0 }); return; }
+  // the host's state reflects our inputs from about one round trip ago: compare with where we predicted we were then
+  const tt = now() - (V.rtt || 60) - TICK_MS / 2; let h = null;
+  for (let i = pred.hist.length - 1; i >= 0; i--) if (pred.hist[i].t <= tt) { h = pred.hist[i]; break; }
+  if (!h) h = pred.hist[0]; if (!h) return;
+  const ex = e[1] - h.x, ey = e[2] - h.y, err = Math.hypot(ex, ey);
+  pred.errs.push(Math.round(err)); if (pred.errs.length > 300) pred.errs.shift();
+  if (err > SNAP_ERR) { Object.assign(pred, { x: e[1], y: e[2], vx: e[7], vy: e[8], hist: [], cx: 0, cy: 0 }); pred.snaps++; return; }
+  pred.cx = ex; pred.cy = ey; // applied gradually in predStep
+  pred.vx += (e[7] - h.vx) * 0.25; pred.vy += (e[8] - h.vy) * 0.25;
+}
+function predStep(dt) {
+  if (role !== 'client' || !pred.ok) return;
+  pred.ax = myIn.x; pred.ay = myIn.y;
+  moveFish(pred, dt);
+  const k = Math.min(1, dt * 10), dx = pred.cx * k, dy = pred.cy * k;
+  pred.x += dx; pred.y += dy; pred.cx -= dx; pred.cy -= dy;
+  for (const h of pred.hist) { h.x += dx; h.y += dy; }
+  wallFish(pred);
+  const t = now(); pred.hist.push({ t, x: pred.x, y: pred.y, vx: pred.vx, vy: pred.vy });
+  while (pred.hist.length && t - pred.hist[0].t > 1000) pred.hist.shift();
+}
+/* one-off effects from the host: pill swallowed, chomp + soul, power-up over */
+function onFx(d) {
+  const t = now(), pl = V.meta.pl || {};
+  if (d.k === 'pill') { const fv = fishView(d.pid); fv.pwAt = t; fv.vs += 4; if (d.pid === myId) toast('MAGIC PILL! 2x size + metal jaws: eat a fish!'); else if (pl[d.pid]) toast(pl[d.pid][0] + ' got the magic pill!'); }
+  else if (d.k === 'unpw') { const fv = fishView(d.pid); fv.unAt = t; fv.vs -= 2; if (d.pid === myId && d.why === 'time') toast('Power-up wore off'); }
+  else if (d.k === 'chomp') {
+    const m = pl[d.b] || [];
+    V.souls.push({ x: d.x, y: d.y, f: d.f, s: d.s, sp: m[1], c: m[2], t, by: d.a });
+    const fa = fishView(d.a); fa.chompAt = t; fa.snap = t;
+    if (d.b === myId) { pred.ok = false; releaseAll(); }
+    else if (d.a === myId) toast('CHOMP! You ate ' + (m[0] || 'a fish') + '!');
+    else toast((pl[d.a] || ['Someone'])[0] + ' ate ' + (m[0] || 'a fish') + '!');
+  }
 }
 const eatenIds = new Set();
 // A capture (from the host event or a snapshot flake with a captured-by id) starts the pull locally.
@@ -624,6 +792,7 @@ function onEat(e, age = 0) {
   const [fid, pid, x, y, k] = e; if (eatenIds.has(fid)) return; eatenIds.add(fid); if (eatenIds.size > 500) eatenIds.clear();
   const t0 = now() - Math.min(age, CAP_MS);
   const fv = fishView(pid);
+  if (k === 3) { V.pillCap = fid; }
   V.eats.push({ fid, pid, x, y, k, t: t0, arrive: t0 + CAP_MS, parts: REDUCED ? [] : Array.from({ length: 7 }, () => ({ a: rand(-1.1, 1.1), r: rand(1.6, 3.2), d: rand(0, 0.35), l: rand(8, 16) })) });
   fv.holdSize = fv.holdUntil > now() ? fv.holdSize : fv.ds; fv.holdUntil = t0 + CAP_MS;
 }
@@ -632,10 +801,15 @@ function fishView(id) { let f = V.fish.get(id); if (!f) { f = { ds: 1, vs: 0, mo
 let shake = 0, lastFrame = now(), boardAt = 0, urgent = false;
 function frame() {
   const t = now(); const dt = Math.min(0.05, (t - lastFrame) / 1000); lastFrame = t;
+  if (joined) steer(pred.ok && role === 'client' ? pred : (V.lastMe || null));
+  predStep(dt);
   const st = interp();
-  const players = st ? st.players : [], foods = st ? st.foods.filter((f) => !eatenIds.has(f.id)) : [];
-  const me = players.find((p) => p.id === myId);
-  if (joined) steer(me);
+  const all = st ? st.players : [], foods = st ? st.foods.filter((f) => !eatenIds.has(f.id)) : [];
+  const players = all.filter((p) => !p.out), pill = st && st.pill && !eatenIds.has(st.pill.id) ? st.pill : null;
+  const meAll = all.find((p) => p.id === myId), me = meAll && !meAll.out ? meAll : null; V.lastMe = me;
+  const spectating = !!(joined && meAll && meAll.out);
+  const eb = $('#eatenBanner'); if (eb.hidden === (spectating && V.ph === 'play')) eb.hidden = !(spectating && V.ph === 'play');
+  if (QS.has('test')) { const dm = new Map(); for (const p of all) dm.set(p.id, { x: p.x, y: p.y, size: p.size, out: p.out, pw: p.pw }); window.__drawn = dm; }
   // urgency
   const set = V.meta.set || DEFAULTS;
   const maxScore = Math.max(0, ...players.map((p) => p.score));
@@ -643,7 +817,7 @@ function frame() {
   if (u !== urgent) { urgent = u; document.body.classList.toggle('urgent', u); }
   // camera
   const zFit = Math.min(VW / WORLD_W, VH / WORLD_H);
-  const zTarget = joined ? Math.max(0.42, Math.min(VW / 1150, VH / 760)) : Math.max(zFit, Math.min(VW / WORLD_W, VH / WORLD_H) * 1.0);
+  const zTarget = joined && !spectating ? Math.max(0.42, Math.min(VW / 1150, VH / 760)) : Math.max(zFit, Math.min(VW / WORLD_W, VH / WORLD_H) * 1.0);
   cam.z += (zTarget - cam.z) * Math.min(1, dt * 4);
   let tx = WORLD_W / 2, ty = WORLD_H / 2; if (me) { tx = me.x; ty = me.y; }
   const hw = VW / 2 / cam.z, hh = VH / 2 / cam.z;
@@ -658,15 +832,18 @@ function frame() {
   ctx.setTransform(DPR * cam.z, 0, 0, DPR * cam.z, DPR * (VW / 2 - cam.x * cam.z + sx), DPR * (VH / 2 - cam.y * cam.z + sy));
   drawTank(t, dt);
   drawFood(foods, t);
+  if (pill) drawPill(pill.x, pill.y, t, clamp(pill.fade, 0, 1), 1);
   // fish (smaller first so big fish sit on top), names after
   const sorted = players.slice().sort((a, b) => a.size - b.size);
-  for (const p of sorted) drawFish(p, foods, t, dt);
+  const bait = pill ? foods.concat([{ x: pill.x, y: pill.y }]) : foods;
+  for (const p of sorted) drawFish(p, bait, t, dt);
   drawEats(players, t);
+  drawSouls(t);
   for (const p of sorted) drawName(p);
   if (urgent) { ctx.setTransform(DPR, 0, 0, DPR, 0, 0); const a = 0.10 + 0.08 * Math.sin(t / 160); ctx.fillStyle = `rgba(255,46,136,${a})`; ctx.fillRect(0, 0, VW, VH); }
   // HUD text
   updateHud(players, t);
-  if (t - boardAt > 150 && joined) { boardAt = t; renderBoard(players); }
+  if (t - boardAt > 150 && joined) { boardAt = t; renderBoard(all); }
   requestAnimationFrame(frame);
 }
 function drawTank(t, dt) {
@@ -765,10 +942,13 @@ function drawFish(p, foods, t, dt) {
   // gulp: quick squash (shorter, taller) then rebound
   const gk = since < 260 ? since / 260 : 1, gulp = gk < 1 ? Math.sin(gk * Math.PI) * Math.exp(-gk * 2) : 0;
   ctx.scale((1 + Math.sin(fv.wig) * 0.025) * (1 - 0.12 * gulp), 1 + 0.14 * gulp);
+  const pw = p.pw > 0, warn = pw && p.pw < PW_WARN, blinkOff = warn && Math.floor(t / (p.pw < 1200 ? 90 : 160)) % 2 === 0;
+  if (pw && !blinkOff) drawAura(w, h, t);
   if (p.id === myId) { ctx.fillStyle = 'rgba(255,230,0,.35)'; ctx.beginPath(); ctx.ellipse(0, 0, w * 0.48, h * 0.45, 0, 0, 7); ctx.fill(); }
   if (spr) ctx.drawImage(spr, -w / 2, -h / 2, w, h);
   else { ctx.fillStyle = (COLORS.find((c) => c.id === m[2]) || COLORS[0]).hex; ctx.beginPath(); ctx.ellipse(0, 0, w * 0.35, h * 0.3, 0, 0, 7); ctx.fill(); }
-  if (fv.mouth > 0.04) {
+  if (pw && !(warn && blinkOff)) { ctx.save(); ctx.translate(lx - 4 * ds, ly); drawJaws(ds, t, fv); ctx.restore(); }
+  if (fv.mouth > 0.04 && !pw) {
     const o = fv.mouth, sc = ds;
     ctx.translate(lx - 3 * sc, ly);
     ctx.fillStyle = '#111'; ctx.beginPath(); ctx.ellipse(0, 0, (4 + 6 * o) * sc, (2 + 9 * o) * sc, 0, 0, 7); ctx.fill();
@@ -776,7 +956,90 @@ function drawFish(p, foods, t, dt) {
     ctx.strokeStyle = '#111'; ctx.lineWidth = 2.5 * sc; ctx.beginPath(); ctx.ellipse(0, 0, (4 + 6 * o) * sc, (2 + 9 * o) * sc, 0, 0, 7); ctx.stroke();
   }
   ctx.restore();
+  if (pw && p.id === myId) { // countdown ring above your powered fish
+    ctx.save(); ctx.lineWidth = 6; ctx.strokeStyle = warn ? (blinkOff ? '#fff' : '#FF2E88') : '#A970FF'; ctx.beginPath();
+    ctx.arc(p.x, p.y - h * 0.62 - 30, 13, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * clamp(p.pw / PW_MS, 0, 1)); ctx.stroke(); ctx.restore();
+  }
   p._mx = mx; p._my = my; p._h = h;
+}
+// rainbow aura around a powered fish (fish-local coords)
+function drawAura(w, h, t) {
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  const pulse = REDUCED ? 1 : 1 + 0.06 * Math.sin(t / 140);
+  for (let i = 0; i < 3; i++) {
+    const hue = (t / 8 + i * 120) % 360;
+    ctx.fillStyle = `hsla(${hue},100%,62%,${0.18 - i * 0.04})`;
+    ctx.beginPath(); ctx.ellipse(0, 0, w * (0.58 + i * 0.07) * pulse, h * (0.58 + i * 0.07) * pulse, 0, 0, 7); ctx.fill();
+  }
+  ctx.restore();
+  if (!REDUCED) for (let i = 0; i < 6; i++) { // orbiting sparkles
+    const a = t / 500 + i * Math.PI / 3, x = Math.cos(a) * w * 0.6, y = Math.sin(a) * h * 0.6, s = 5 + 2 * Math.sin(t / 90 + i);
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.moveTo(x, y - s); ctx.lineTo(x + s * 0.3, y); ctx.lineTo(x, y + s); ctx.lineTo(x - s * 0.3, y); ctx.closePath(); ctx.fill();
+  }
+}
+// steel jaws at the mouth with a moving glint; they snap shut on a chomp
+function drawJaws(ds, t, fv) {
+  const since = t - (fv.chompAt || -1e9), snap = since < 260 ? 1 - since / 260 : 0;
+  const open = 0.55 + (REDUCED ? 0 : 0.25 * Math.sin(t / 160)) - 0.55 * snap;
+  const L = 26 * ds, H = 16 * ds * Math.max(0.05, open), n = 4;
+  const g = ctx.createLinearGradient(-L, -H, L * 0.4, H);
+  g.addColorStop(0, '#5d6670'); g.addColorStop(0.45, '#e9eef3'); g.addColorStop(0.55, '#b9c2cb'); g.addColorStop(1, '#4a525b');
+  for (const sgn of [-1, 1]) {
+    ctx.beginPath(); ctx.moveTo(-L, sgn * 2 * ds); ctx.lineTo(L * 0.25, sgn * (H + 3 * ds)); ctx.lineTo(L * 0.25, sgn * 2 * ds);
+    for (let i = 0; i <= n; i++) { const x = L * 0.25 - (i / n) * L * 1.25; ctx.lineTo(x, i % 2 ? sgn * 2 * ds : sgn * (2 * ds - 7 * ds)); }
+    ctx.closePath(); ctx.fillStyle = g; ctx.fill(); ctx.lineWidth = 2.5 * ds * 0.8; ctx.strokeStyle = '#111'; ctx.stroke();
+  }
+  // glint sweeping across the steel
+  const gx = REDUCED ? -L * 0.3 : -L + ((t / 700) % 1) * L * 1.4;
+  ctx.save(); ctx.globalAlpha = 0.9; ctx.fillStyle = '#fff'; const s = 5 * ds;
+  ctx.beginPath(); ctx.moveTo(gx, -H - s); ctx.lineTo(gx + s * 0.35, -H); ctx.lineTo(gx, -H + s); ctx.lineTo(gx - s * 0.35, -H); ctx.closePath(); ctx.fill(); ctx.restore();
+}
+// glowing capsule pill
+function drawPill(x, y, t, alpha, scale) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(REDUCED ? 0.5 : Math.sin(t / 300) * 0.6 + 0.5); ctx.scale(scale, scale); ctx.globalAlpha = alpha;
+  const hue = (t / 6) % 360, pulse = REDUCED ? 1 : 1 + 0.15 * Math.sin(t / 120);
+  const gl = ctx.createRadialGradient(0, 0, 2, 0, 0, 40 * pulse);
+  gl.addColorStop(0, `hsla(${hue},100%,75%,.9)`); gl.addColorStop(1, `hsla(${hue},100%,60%,0)`);
+  ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(0, 0, 40 * pulse, 0, 7); ctx.fill();
+  const r = PILL_R * 0.75, L = PILL_R * 1.1;
+  ctx.lineWidth = 3; ctx.strokeStyle = '#111';
+  ctx.fillStyle = '#FF2E88'; ctx.beginPath(); ctx.arc(-L / 2, 0, r, Math.PI / 2, Math.PI * 1.5); ctx.lineTo(0, -r); ctx.lineTo(0, r); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#00E5FF'; ctx.beginPath(); ctx.arc(L / 2, 0, r, -Math.PI / 2, Math.PI / 2); ctx.lineTo(0, r); ctx.lineTo(0, -r); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,.8)'; ctx.beginPath(); ctx.ellipse(-L / 2, -r * 0.4, r * 0.5, r * 0.22, 0, 0, 7); ctx.fill();
+  ctx.restore();
+  if (!REDUCED && alpha > 0.5) for (let i = 0; i < 3; i++) { const a = t / 260 + i * 2.1, rr = 24 + 4 * Math.sin(t / 100 + i), s = 5;
+    const cx = x + Math.cos(a) * rr, cy = y + Math.sin(a) * rr; ctx.fillStyle = '#FFE600'; ctx.strokeStyle = '#111'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(cx, cy - s); ctx.lineTo(cx + s * 0.3, cy); ctx.lineTo(cx, cy + s); ctx.lineTo(cx - s * 0.3, cy); ctx.closePath(); ctx.fill(); ctx.stroke(); }
+}
+// chomp: the eaten fish squashes into the jaws, then a translucent ghost floats up, wobbles and fades
+const SOUL_MS = 2600;
+function drawSouls(t) {
+  V.souls = V.souls.filter((s) => t - s.t < SOUL_MS);
+  for (const s of V.souls) {
+    const age = t - s.t, w = FISH_LEN * s.s, h = FISH_HT * s.s * fatOf(s.s), spr = s.sp && window.FinFish.sprite(s.sp, s.c);
+    if (age < 320) { // squash + crunch lines
+      const k = age / 320; ctx.save(); ctx.translate(s.x, s.y); ctx.scale(s.f * (1 - 0.7 * k), 1 - 0.5 * k); ctx.globalAlpha = 1 - k * 0.6;
+      if (spr) ctx.drawImage(spr, -w / 2, -h / 2, w, h); ctx.restore();
+      ctx.save(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 4; for (let i = 0; i < 8; i++) { const a = i * Math.PI / 4, r = 20 + k * 50;
+        ctx.beginPath(); ctx.moveTo(s.x + Math.cos(a) * r, s.y + Math.sin(a) * r); ctx.lineTo(s.x + Math.cos(a) * (r + 14), s.y + Math.sin(a) * (r + 14)); ctx.stroke(); }
+      ctx.font = '700 30px Bungee, sans-serif'; ctx.textAlign = 'center'; ctx.lineWidth = 6; ctx.strokeStyle = '#111'; ctx.fillStyle = '#FFE600';
+      ctx.strokeText('CHOMP!', s.x, s.y - 50 - k * 20); ctx.fillText('CHOMP!', s.x, s.y - 50 - k * 20); ctx.restore();
+      continue;
+    }
+    const k = (age - 320) / (SOUL_MS - 320), rise = REDUCED ? 0 : k * 170, wob = REDUCED ? 0 : Math.sin(k * 14) * 18 * (1 - k * 0.5);
+    const a = (k < 0.15 ? k / 0.15 : 1) * (1 - k) * 0.75;
+    ctx.save(); ctx.translate(s.x + wob, s.y - rise); ctx.globalAlpha = a;
+    // ghost body
+    const gw = Math.max(36, w * 0.5), gh = gw * 1.15;
+    ctx.fillStyle = 'rgba(235,245,255,.95)'; ctx.strokeStyle = 'rgba(17,17,17,.6)'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(-gw / 2, gh * 0.25); ctx.arc(0, -gh * 0.1, gw / 2, Math.PI, 0);
+    ctx.lineTo(gw / 2, gh * 0.45); for (let i = 0; i < 4; i++) { const x0 = gw / 2 - (i + 0.5) * gw / 4; ctx.quadraticCurveTo(x0, gh * (i % 2 ? 0.6 : 0.3) + (REDUCED ? 0 : Math.sin(t / 120 + i) * 3), x0 - gw / 8, gh * 0.45); }
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#111'; ctx.beginPath(); ctx.ellipse(-gw * 0.16, -gh * 0.12, gw * 0.07, gw * 0.1, 0, 0, 7); ctx.ellipse(gw * 0.16, -gh * 0.12, gw * 0.07, gw * 0.1, 0, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(0, gh * 0.08, gw * 0.08, gw * 0.06, 0, 0, 7); ctx.fill();
+    if (spr) { ctx.globalAlpha = a * 0.35; ctx.scale(s.f, 1); ctx.drawImage(spr, -gw * 0.45, gh * 0.05, gw * 0.9, gw * 0.7); }
+    ctx.restore();
+  }
 }
 function drawEats(players, t) {
   const byId = new Map(players.map((p) => [p.id, p]));
@@ -786,10 +1049,11 @@ function drawEats(players, t) {
     if (p && age < dur) drawSuck(e, p, age / dur, t);
     const after = t - e.arrive;
     if (p && after >= 0) { // +1 / +2 pop after the gulp
-      const k = after / 900; if (k >= 1) continue; ctx.save(); ctx.globalAlpha = 1 - k; ctx.font = `700 ${22 + 6 * (e.k - 1)}px Bungee, Fredoka, sans-serif`; ctx.textAlign = 'center';
-      ctx.lineWidth = 5; ctx.strokeStyle = '#111'; ctx.fillStyle = e.k === 2 ? '#FFC21A' : '#FF5FA8';
-      const y = (p._my || p.y) - 20 - k * 50; ctx.strokeText('+' + e.k, p._mx || p.x, y); ctx.fillText('+' + e.k, p._mx || p.x, y); ctx.restore();
-      if (e.k === 2 && after < 400) drawSparkles(p._mx || p.x, p._my || p.y, after, t);
+      const k = after / 900; if (k >= 1) continue; ctx.save(); ctx.globalAlpha = 1 - k; ctx.font = `700 ${e.k === 3 ? 30 : 22 + 6 * (e.k - 1)}px Bungee, Fredoka, sans-serif`; ctx.textAlign = 'center';
+      ctx.lineWidth = 5; ctx.strokeStyle = '#111'; ctx.fillStyle = e.k === 3 ? '#A970FF' : e.k === 2 ? '#FFC21A' : '#FF5FA8';
+      const lab = e.k === 3 ? 'POWER UP!' : '+' + e.k;
+      const y = (p._my || p.y) - 20 - k * 50; ctx.strokeText(lab, p._mx || p.x, y); ctx.fillText(lab, p._mx || p.x, y); ctx.restore();
+      if (e.k >= 2 && after < 400) drawSparkles(p._mx || p.x, p._my || p.y, after, t);
       if (after < 200) { ctx.save(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; const r = 8 + after / 8; for (let i = 0; i < 6; i++) { const a = i * Math.PI / 3; ctx.beginPath(); ctx.moveTo((p._mx || p.x) + Math.cos(a) * r, (p._my || p.y) + Math.sin(a) * r); ctx.lineTo((p._mx || p.x) + Math.cos(a) * (r + 7), (p._my || p.y) + Math.sin(a) * (r + 7)); ctx.stroke(); } ctx.restore(); }
     }
   }
@@ -812,6 +1076,7 @@ function drawSuck(e, p, k, t) {
     ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.beginPath(); ctx.arc(px, py, s.r, 0, 7); ctx.fill(); ctx.stroke();
     ctx.restore();
   }
+  if (e.k === 3) { drawPill(x, y, t, 1, shrink * 1.2); return; }
   ctx.save(); ctx.translate(x, y); ctx.rotate(ang); ctx.scale(stretch * shrink, shrink / Math.sqrt(stretch));
   flakePath(FOOD_R * (e.k === 2 ? 1.15 : 1), e.fid);
   ctx.fillStyle = e.k === 2 ? '#FFC21A' : '#FF5FA8'; ctx.fill(); ctx.lineWidth = 2.5 / shrink; ctx.strokeStyle = '#111'; ctx.stroke();
@@ -845,7 +1110,7 @@ function updateHud(players, t) {
   const set = V.meta.set || DEFAULTS; const ph = V.ph;
   let phase = 'FREE SWIM', timer = '';
   if (ph === 'lobby') { phase = 'FREE SWIM · ロビー'; timer = set.mode === 'timer' ? `${set.min}:00 TIMER` : `GOAL ${set.goal} PTS`; }
-  else if (ph === 'countdown') { phase = 'GET READY'; timer = set.mode === 'timer' ? `${set.min}:00` : `GOAL ${set.goal}`; const n = Math.ceil(V.cd / 1000); if (n > 0) popCountdown(String(n)); }
+  else if (ph === 'countdown') { phase = 'GET READY'; timer = set.mode === 'timer' ? `${set.min}:00` : `GOAL ${set.goal}`; const n = Math.ceil(V.cd / 1000); if (n > 0 && V.meta.ph === 'countdown') popCountdown(String(n)); }
   else if (ph === 'play') {
     phase = 'FEEDING TIME!';
     if (set.mode === 'timer') { const s = Math.ceil(V.tl / 1000); timer = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
@@ -880,6 +1145,7 @@ document.addEventListener('pointerdown', (e) => { if (!$('#menu').hidden && !e.t
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#menu').hidden) { closeMenu(); $('#menuBtn').focus(); } });
 document.querySelectorAll('#modeSeg button').forEach((b) => { b.onclick = () => hostSet({ mode: b.dataset.mode }); });
 document.querySelectorAll('#foodSeg button').forEach((b) => { b.onclick = () => hostSet({ food: b.dataset.food }); });
+document.querySelectorAll('#pwSeg button').forEach((b) => { b.onclick = () => hostSet({ pw: b.dataset.pw === '1' }); });
 $('#timerStep').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) hostSet({ mode: 'timer', dmin: +b.dataset.d }); });
 $('#goalStep').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) hostSet({ mode: 'goal', dgoal: +b.dataset.d }); });
 $('#startOverBtn').onclick = () => { hostToLobby(); closeMenu(); toast('Back to the lobby'); };
@@ -904,5 +1170,5 @@ function showPickWhenConnected() {
 }
 $('#joinForm').addEventListener('submit', showPickWhenConnected);
 requestAnimationFrame(frame);
-if (QS.has('test')) window.__finops = { V, H, cam, w2s: (x, y) => ({ x: (x - cam.x) * cam.z + VW / 2, y: (y - cam.y) * cam.z + VH / 2 }), get role() { return role; }, get myId() { return myId; }, get room() { return room; }, hostSet, hostStart, mouthOf, suckRadius, CAP_MS };
+if (QS.has('test')) window.__finops = { V, H, cam, w2s: (x, y) => ({ x: (x - cam.x) * cam.z + VW / 2, y: (y - cam.y) * cam.z + VH / 2 }), get role() { return role; }, get myId() { return myId; }, get room() { return room; }, hostSet, hostStart, mouthOf, suckRadius, CAP_MS, pred, get drawn() { return window.__drawn; }, spawnPill, PW_MS };
 })();

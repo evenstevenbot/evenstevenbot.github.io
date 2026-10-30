@@ -76,10 +76,11 @@
   <div id="readyCount" class="ready-count"></div>
   <button id="readyBtn" class="big yellow">I'm ready</button>
   <button id="startBtn" class="big pink" hidden>Start game</button>
-  <div class="hint">Swim with your mouse, a finger, or arrow keys / WASD</div>
+  <div class="hint" id="steerHint">Swim with the arrow keys or WASD</div>
 </div>
 
 <div id="countdown" hidden><div id="cdText"></div></div>
+<div id="eatenBanner" hidden role="status" aria-live="polite"><b>You got eaten!</b><span>Your score is locked in</span><small>Spectating until the next round 👻</small></div>
 
 <section id="endScreen" hidden>
   <div class="card end-card">
@@ -106,6 +107,8 @@
     <div class="stepper" id="goalStep"><span>Goal</span><button data-d="-1" aria-label="Lower goal">−</button><b id="goalVal">20 pts</b><button data-d="1" aria-label="Higher goal">+</button></div>
     <div class="menu-h">Food quantity <span class="host-only">host only</span></div>
     <div class="seg" id="foodSeg"><button data-food="low">Low</button><button data-food="med">Medium</button><button data-food="high">High</button></div>
+    <div class="menu-h">Power-ups <span class="host-only">host only</span></div>
+    <div class="seg" id="pwSeg"><button data-pw="1">On</button><button data-pw="0">Off</button></div>
   </div>
   <div class="menu-sec">
     <button id="startOverBtn" class="wide yellow">Start over <small class="host-only">host only</small></button>
