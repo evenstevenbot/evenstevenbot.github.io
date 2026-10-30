@@ -18,7 +18,7 @@ const TICK_MS = 33, SNAP_EVERY = 2, INTERP_MAX = 150, INTERP_MIN = 50, HOST_INTE
 const FOOD_R = 9, PILL_R = 18;
 // flakes / second (scaled by player count). Round 2: 20% less food at every level (was 1.1 / 2.1 / 3.6).
 const FOOD_RATE = { low: 0.88, med: 1.68, high: 2.88 };
-const DEFAULTS = { mode: 'timer', min: 1, goal: 20, food: 'med', pw: true };
+const DEFAULTS = { mode: 'timer', min: 1, goal: 20, food: 'med', pw: true, fp: true, fg: false };
 // Magic pill power-up: one at a time, every 25-40 s at random; powered fish is 2x with metal jaws for up to 15 s.
 const PILL_GAP = [25000, 40000], PW_MS = 15000, PW_WARN = 3000;
 const NAME_KEY = 'finops-name', FISH_KEY = 'finops-fish';
@@ -231,7 +231,8 @@ const pillGap = () => rand(PILL_GAP[0], PILL_GAP[1]);
 function powerUp(p) { p.pw = Date.now() + PW_MS; p.size = p.base * SHARK_X; fxAll({ k: 'pill', pid: p.id }); }
 function powerDown(p, why) { if (!p.pw) return; p.pw = 0; p.size = p.base; fxAll({ k: 'unpw', pid: p.id, why }); }
 function spawnFood() {
-  const gold = Math.random() < 0.2;
+  const fp = H.set.fp !== false, fg = !!H.set.fg;
+  const gold = fg && (!fp || Math.random() < 0.2); // flake types the host enabled; total rate unchanged
   const fast = Math.random() < 0.3;
   H.foods.push({
     id: H.nextFood++, k: gold ? 2 : 1, x: rand(60, WORLD_W - 60), y: -10,
@@ -282,7 +283,7 @@ function hostTick() {
       if (f.fade > 0 && f.y > 0) for (const [p, m] of mouths) {
         if (inSuction(p, m, f)) {
           f.capd = true; f.cap = p.id; f.capAt = Date.now(); p.score += f.k; p.eats++; p.lastScore = Date.now();
-          p.base = Math.min(MAX_SIZE, p.base * GROW); p.size = p.base * (p.pw ? SHARK_X : 1);
+          // fish no longer grow when they eat (size stays at base; shark is base*SHARK_X)
           H.ev.push([f.id, p.id, Math.round(f.x), Math.round(f.y), f.k, H.tick]); break;
         }
       }
@@ -391,6 +392,7 @@ function hostSet(patch) {
   if (patch.dmin) s.min = clamp(s.min + patch.dmin, 1, 10);
   if (patch.dgoal) s.goal = clamp(s.goal + patch.dgoal * 5, 5, 100);
   if (patch.food && FOOD_RATE[patch.food]) s.food = patch.food;
+  if (patch.fl === 'p' || patch.fl === 'g') { const k = patch.fl === 'p' ? 'fp' : 'fg', o = patch.fl === 'p' ? 'fg' : 'fp'; const cur = k === 'fp' ? s.fp !== false : !!s.fg; if (!cur || (o === 'fp' ? s.fp !== false : !!s.fg)) s[k] = !cur; }
   if (patch.pw != null) { s.pw = !!patch.pw; if (!s.pw) { H.pill = null; for (const p of H.players.values()) powerDown(p, 'off'); } }
   bumpMeta();
 }
@@ -633,6 +635,8 @@ function renderMetaUI() {
   document.querySelectorAll('#foodSeg button').forEach((b) => { b.classList.toggle('on', b.dataset.food === set.food); b.disabled = !host; });
   const pwOn = set.pw !== false;
   document.querySelectorAll('#pwSeg button').forEach((b) => { b.classList.toggle('on', (b.dataset.pw === '1') === pwOn); b.disabled = !host; });
+  const flOn = { p: set.fp !== false, g: !!set.fg };
+  document.querySelectorAll('#flSeg button').forEach((b) => { b.classList.toggle('on', flOn[b.dataset.fl]); b.setAttribute('aria-pressed', flOn[b.dataset.fl]); b.disabled = !host; });
   $('#timerVal').textContent = set.min + ' min'; $('#goalVal').textContent = set.goal + ' pts';
   $('#timerStep').classList.toggle('dim', set.mode !== 'timer'); $('#goalStep').classList.toggle('dim', set.mode !== 'goal');
   document.querySelectorAll('.stepper button').forEach((b) => { b.disabled = !host; });
@@ -642,7 +646,7 @@ function renderMetaUI() {
   const inLobby = joined && m.ph === 'lobby';
   $('#lobbyBar').hidden = !inLobby;
   const pl = Object.entries(m.pl || {}); const ready = pl.filter(([, p]) => p[3]).length;
-  $('#readyCount').textContent = `${ready}/${pl.length} ready` + (host ? '' : ' · host starts the game') + ` · Power-ups ${set.pw !== false ? 'On ✨' : 'Off'}`;
+  $('#readyCount').textContent = `${ready}/${pl.length} ready` + (host ? '' : ' · host starts the game') + ` · Power-ups ${set.pw !== false ? 'On ✨' : 'Off'} · Flakes ${[set.fp !== false ? 'Pink 1pt' : '', set.fg ? 'Gold 2pt' : ''].filter(Boolean).join(' + ')}`;
   const me = m.pl && m.pl[myId]; readyLocal = !!(me && me[3]);
   $('#readyBtn').textContent = readyLocal ? 'Ready! ✓' : "I'm ready"; $('#readyBtn').classList.toggle('on', readyLocal);
   $('#startBtn').hidden = !host; $('#startBtn').classList.toggle('all-ready', pl.length > 0 && ready === pl.length);
@@ -956,7 +960,7 @@ function drawFish(p, foods, t, dt) {
   const m = V.meta.pl[p.id]; if (!m) return;
   const fv = fishView(p.id);
   // bouncy grow spring toward real size
-  if (fv.holdUntil && t >= fv.holdUntil) { fv.holdUntil = 0; fv.snap = t; fv.vs += 2.6; } // gulp, then grow
+  if (fv.holdUntil && t >= fv.holdUntil) { fv.holdUntil = 0; fv.snap = t; } // gulp (no growth)
   const sharkHeld = fv.holdShark && t < fv.holdShark; // stay a shark for a beat after the chomp, then morph back
   const target = sharkHeld ? fv.sharkSize : fv.holdUntil ? Math.min(p.size, fv.holdSize) : p.size;
   fv.vs += (target - fv.ds) * 160 * dt; fv.vs *= Math.exp(-9 * dt); fv.ds += fv.vs * dt;
@@ -1317,6 +1321,7 @@ document.addEventListener('pointerdown', (e) => { if (!$('#menu').hidden && !e.t
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#menu').hidden) { closeMenu(); $('#menuBtn').focus(); } });
 document.querySelectorAll('#modeSeg button').forEach((b) => { b.onclick = () => hostSet({ mode: b.dataset.mode }); });
 document.querySelectorAll('#foodSeg button').forEach((b) => { b.onclick = () => hostSet({ food: b.dataset.food }); });
+document.querySelectorAll('#flSeg button').forEach((b) => { b.onclick = () => hostSet({ fl: b.dataset.fl }); });
 document.querySelectorAll('#pwSeg button').forEach((b) => { b.onclick = () => hostSet({ pw: b.dataset.pw === '1' }); });
 $('#timerStep').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) hostSet({ mode: 'timer', dmin: +b.dataset.d }); });
 $('#goalStep').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) hostSet({ mode: 'goal', dgoal: +b.dataset.d }); });
