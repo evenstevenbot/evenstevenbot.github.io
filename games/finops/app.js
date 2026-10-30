@@ -11,7 +11,7 @@ const { COLORS, SPECIES } = window.FinFish;
 const PREFIX = 'evenstevenbot-finops-v1-';
 const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ';
 const MAX_PLAYERS = 20;
-const WORLD_W = 2000, WORLD_H = 1250, SAND_H = 70;
+const WORLD_W = 1760, WORLD_H = 1100, SAND_H = 70; // ~12% smaller tank (was 2000 x 1250)
 const FISH_LEN = 110, FISH_HT = FISH_LEN * 208 / 268;
 const MAX_SIZE = 2.6, GROW = 1.1;
 const TICK_MS = 33, SNAP_EVERY = 2, INTERP_MAX = 150, INTERP_MIN = 50, HOST_INTERP = 45;
@@ -179,12 +179,12 @@ const CAP_MS = REDUCED ? 90 : 150;
 const faceOf = (p) => ({ x: Math.cos(p.a) * p.f, y: Math.sin(p.a) });
 // forgiving capture: anything whose own radius overlaps the mouth (drawn mouth position, same on host + clients)
 // is sucked in from any side; a little extra reach straight ahead of the face. No vacuuming from afar.
-const lipRadius = (size) => 12 + 7 * size;
+const lipRadius = (size) => 17 + 9 * size; // widened catch area
 const PILL_CAP_R = 26; // the pill's drawn capsule half-length (PILL_R * 1.45 scale)
 function inSuction(p, m, f, itemR = FOOD_R) {
   const dx = f.x - m.x, dy = f.y - m.y, d = Math.hypot(dx, dy), touch = lipRadius(p.size) + itemR;
   if (d <= touch) return true;
-  if (d > touch * 1.35) return false;
+  if (d > touch * 1.5) return false;
   const fc = faceOf(p); return (dx * fc.x + dy * fc.y) / (d || 1) >= SUCK_COS;
 }
 
@@ -207,9 +207,19 @@ function wallFish(p) {
   if (p.y < top) { p.y = top; p.vy = Math.abs(p.vy) * 0.5; } if (p.y > bot) { p.y = bot; p.vy = -Math.abs(p.vy) * 0.5; }
 }
 // falling + fluttering + shy of nearby mouths (flakes and the pill)
+// per-flake seeded RNG (mulberry32) so clients can replay a flake's fall exactly from its spawn state
+function frnd(f) { let t = (f.rs = (f.rs + 0x6D2B79F5) | 0); t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }
+const fr = (f, lo, hi) => (f.rs != null ? lo + frnd(f) * (hi - lo) : rand(lo, hi));
+const FDT = TICK_MS / 1000; // food always steps a fixed dt per host tick (deterministic on clients)
+function flakeFromSeed(id, k, seed) {
+  const f = { id, k, rs: seed | 0, dvx: 0, fade: 1, t: 0, y: -10 };
+  f.x = fr(f, 60, WORLD_W - 60); const fast = frnd(f) < 0.3; f.vy = fast ? fr(f, 150, 230) : fr(f, 40, 85);
+  f.drift = fr(f, -25, 25); f.wob = fr(f, 18, 55); f.wf = fr(f, 1.4, 3.2); f.ph = fr(f, 0, 6.28); f.dart = fr(f, 0.4, 1.5);
+  return f;
+}
 function moveFlake(f, dt, mouths, shy = 1) {
   f.t += dt; f.dart -= dt;
-  if (f.dart <= 0) { f.dart = rand(0.5, 1.6); f.dvx = rand(-1, 1) * rand(60, 140) * shy; }
+  if (f.dart <= 0) { f.dart = fr(f, 0.5, 1.6); f.dvx = fr(f, -1, 1) * fr(f, 60, 140) * shy; }
   f.dvx *= Math.exp(-2.5 * dt);
   let ev = 0, evy = 0, near = false;
   for (const [, m] of mouths) {
@@ -217,11 +227,13 @@ function moveFlake(f, dt, mouths, shy = 1) {
     if (d < 140) near = true;
     if (d < 95 * shy && d > 40) { const k = (1 - d / (95 * shy)) * 120 * shy; ev += dx / d * k; evy += dy / d * k * 0.4; }
   }
+  f.near = near;
   if (near) { ev *= 0.25; evy *= 0.25; f.dvx *= Math.exp(-6 * dt); } // close to a mouth: barely dodges, so it's catchable
   f.x += (f.drift + f.dvx + ev + Math.cos(f.t * f.wf + f.ph) * f.wob * f.wf * 0.5) * dt;
   f.y += (f.vy + evy) * dt;
   f.x = clamp(f.x, 15, WORLD_W - 15);
   if (f.y > WORLD_H - SAND_H + 5) f.fade -= dt * 1.5;
+  return f;
 }
 function spawnPill() {
   H.pill = { id: H.nextFood++, x: rand(160, WORLD_W - 160), y: -20, vy: rand(55, 80), drift: rand(-20, 20),
@@ -233,12 +245,9 @@ function powerDown(p, why) { if (!p.pw) return; p.pw = 0; p.size = p.base; fxAll
 function spawnFood() {
   const fp = H.set.fp !== false, fg = !!H.set.fg;
   const gold = fg && (!fp || Math.random() < 0.2); // flake types the host enabled; total rate unchanged
-  const fast = Math.random() < 0.3;
-  H.foods.push({
-    id: H.nextFood++, k: gold ? 2 : 1, x: rand(60, WORLD_W - 60), y: -10,
-    vy: fast ? rand(150, 230) : rand(40, 85), drift: rand(-25, 25),
-    wob: rand(18, 55), wf: rand(1.4, 3.2), ph: rand(0, 6.28), dart: rand(0.4, 1.5), dvx: 0, fade: 1, t: 0,
-  });
+  const seed = (Math.random() * 4294967296) | 0;
+  const f = flakeFromSeed(H.nextFood++, gold ? 2 : 1, seed); f.seed = seed; f.born = H.tick; f.nearT = -99;
+  H.foods.push(f);
 }
 function hostTick() {
   const t = now(); const dt = Math.min(0.08, (t - (H.lastT || t)) / 1000) || TICK_MS / 1000; H.lastT = t;
@@ -279,7 +288,7 @@ function hostTick() {
         if (!p || age >= CAP_MS) { f.fade = -1; continue; }
         const m = mouthOf(p), k = age / CAP_MS; f.x += (m.x - f.x) * k; f.y += (m.y - f.y) * k; continue;
       }
-      moveFlake(f, dt, mouths);
+      moveFlake(f, FDT, mouths); if (f.sh) moveFlake(f.sh, FDT, []);
       if (f.fade > 0 && f.y > 0) for (const [p, m] of mouths) {
         if (inSuction(p, m, f)) {
           f.capd = true; f.cap = p.id; f.capAt = Date.now(); p.score += f.k; p.eats++; p.lastScore = Date.now();
@@ -342,7 +351,8 @@ function hostTick() {
     pl: pl ? [pl.id, Math.round(pl.x), Math.round(pl.y), +pl.fade.toFixed(2), pl.capd ? pl.cap + 1 : 0, pl.capd ? nowMs - pl.capAt : 0] : 0,
     ev: H.ev.map((e) => e.slice(0, 5)) };
   onClientData(snap);
-  if (H.tick % SNAP_EVERY === 0) sendSnap(snap);
+  if (QS.has('test')) { (H.fpos || (H.fpos = new Map())).set(H.tick, H.foods.map((f) => [f.id, f.x, f.y, f.near ? 1 : 0])); H.fpos.delete(H.tick - 400); }
+  if (H.tick % SNAP_EVERY === 0) { const w = wireSnap(snap, all, nowMs); if (QS.has('test')) { H.bytesWire = JSON.stringify(w).length; H.bytesFull = JSON.stringify(snap).length; } sendSnap(w); }
 }
 
 function dropClient(pid) {
@@ -361,7 +371,7 @@ function hostHandle(pid, d) {
       if (!validFish(sp, c)) return;
       if (H.players.size >= MAX_PLAYERS) { e.c.send({ t: 'full' }); return; }
       if (fishTaken(sp, c)) { e.c.send({ t: 'taken' }); return; }
-      addPlayer(pid, { name, sp, c }); e.c.send({ t: 'welcome', id: pid });
+      addPlayer(pid, { name, sp, c }); e.c.send({ t: 'welcome', id: pid }); H.fullFood = 3;
       break;
     }
     case 'in': if (p) { const q = +d.q || 0; if (q && q <= p.inQ) break; p.inQ = q; p.ax = clamp(+d.x || 0, -1, 1); p.ay = clamp(+d.y || 0, -1, 1); p.inAt = Date.now(); } break;
@@ -372,17 +382,67 @@ function hostHandle(pid, d) {
 }
 function onHostConnection(c) {
   if (c.label === 'u') { // second, unordered channel from an already-connected player
-    c.on('open', () => { const pid = H.byPeer.get(c.peer), e = pid != null && H.conns.get(pid); if (!e) { try { c.close(); } catch {} return; } e.u = c;
+    c.on('open', () => { const pid = H.byPeer.get(c.peer), e = pid != null && H.conns.get(pid); if (!e) { try { c.close(); } catch {} return; } e.u = c; H.fullFood = 3;
       c.on('data', (d) => hostHandle(pid, d)); c.on('close', () => { if (e.u === c) e.u = null; }); });
     c.on('error', () => {}); return;
   }
   const pid = H.nextPid++;
   const ent = { c, u: null, lastSeen: Date.now() + 30000 }; // grace while ICE/TURN negotiates; reset on open
   H.conns.set(pid, ent); H.byPeer.set(c.peer, pid);
-  c.on('open', () => { ent.lastSeen = Date.now(); try { c.send({ t: 'hi', you: pid }); c.send(metaMsg()); } catch {} });
+  c.on('open', () => { ent.lastSeen = Date.now(); H.fullFood = 3; try { c.send({ t: 'hi', you: pid }); c.send(metaMsg()); } catch {} });
   c.on('data', (d) => hostHandle(pid, d));
   c.on('close', () => { if (H.conns.get(pid) === ent) dropClient(pid); });
   c.on('error', (er) => { if (er && er.type === 'not-open-yet') return; if (H.conns.get(pid) === ent) dropClient(pid); });
+}
+// Compact wire snapshot (network proposals 1+2): fish without velocity/angle (clients derive them), and food only as
+// full-state entries for new flakes, flakes near a mouth (their path bends), a few round-robin resyncs per snapshot,
+// or every flake right after someone connects. Clients replay the rest of each flake's fall from its seed.
+const fEnt = (f) => [f.id, f.k, f.seed, f.rs, Math.round(f.x * 10), Math.round(f.y * 10), Math.round(f.dvx * 10), Math.round(f.t * 1000), Math.round(f.dart * 1000), Math.round(f.fade * 100)];
+function wireSnap(s, all, nowMs) {
+  const w = { t: 's', n: s.n, ph: s.ph, tl: s.tl, cd: s.cd, pl: s.pl, ev: s.ev,
+    p: all.map((p) => [p.id, Math.round(p.x), Math.round(p.y), +p.size.toFixed(3), p.score, p.f, p.out ? 1 : 0, p.pw ? Math.max(1, p.pw - nowMs) : 0]) };
+  const live = H.foods.filter((f) => !f.capd), n = H.tick, win = SNAP_EVERY * 3, full = H.fullFood > 0;
+  if (full) H.fullFood--;
+  const out = [];
+  // f.sh = the host's copy of exactly what clients are replaying; only resend when the real flake has strayed from it
+  for (const f of live) {
+    const why = !f.sh ? 'new' : full ? 'full' : f.rep && n - f.sentT <= SNAP_EVERY ? 'again' : Math.hypot(f.x - f.sh.x, f.y - f.sh.y) > 0.75 ? 'drift' : '';
+    if (why) { out.push(f); f.rep = why === 'new' || why === 'drift'; // new/corrected flakes go out twice (unreliable channel)
+      if (QS.has('test')) { const W = H.why || (H.why = {}); W[why] = (W[why] || 0) + 1; } }
+  }
+  for (let i = 0, c = 0; live.length && i < live.length && c < 2; i++) { const f = live[(H.rr = ((H.rr || 0) + 1) % live.length)]; if (!out.includes(f)) { out.push(f); c++; } }
+  if (out.length) w.fs = out.map((f) => { const e = fEnt(f); f.sentT = n; f.sh = applyEnt(flakeFromSeed(e[0], e[1], e[2]), e); return e; });
+  if (full || n % 30 === 0) w.fa = live.map((f) => f.id);
+  return w;
+}
+const applyEnt = (f, e) => Object.assign(f, { rs: e[3], x: e[4] / 10, y: e[5] / 10, dvx: e[6] / 10, t: e[7] / 1000, dart: e[8] / 1000, fade: e[9] / 100 });
+function expandSnap(d) {
+  const prev = V.snaps[V.snaps.length - 1];
+  const pm = prev && prev.p ? new Map(prev.p.map((q) => [q[0], q])) : new Map();
+  const dts = prev && prev.n != null ? Math.max(1, d.n - prev.n) * FDT : SNAP_EVERY * FDT;
+  d.p = (d.p || []).map((q) => {
+    const o = pm.get(q[0]); let vx = 0, vy = 0, a = 0;
+    if (o && !q[6] && !o[9]) { vx = (q[1] - o[1]) / dts; vy = (q[2] - o[2]) / dts; a = o[6]; }
+    const tilt = clamp(Math.atan2(vy, Math.abs(vx) + 60) * 0.7, -0.55, 0.55) * q[5];
+    a += (tilt - a) * Math.min(1, dts * 8);
+    return [q[0], q[1], q[2], q[3], q[4], q[5], a, vx, vy, q[6], q[7]];
+  });
+  // food replay
+  const S = V.fsim || (V.fsim = new Map());
+  if (d.ph !== 'play') S.clear();
+  const steps = V.fN != null ? clamp(d.n - V.fN, 0, 300) : 0; V.fN = d.n;
+  for (const f of S.values()) for (let i = 0; i < steps && f.fade > 0; i++) moveFlake(f, FDT, []);
+  for (const e of d.fs || []) {
+    if (eatenIds.has(e[0])) continue;
+    const f = S.get(e[0]) || flakeFromSeed(e[0], e[1], e[2]);
+    if (!S.has(e[0])) S.set(e[0], f);
+    if (QS.has('test') && S.get(e[0]) && f.t > 0) { const dr = Math.hypot(f.x - e[4] / 10, f.y - e[5] / 10); (V.fdrift || (V.fdrift = [])).push(dr); if (V.fdrift.length > 2000) V.fdrift.shift(); }
+    applyEnt(f, e);
+  }
+  for (const e of d.ev || []) S.delete(e[0]);
+  if (d.fa) { const keep = new Set(d.fa); for (const id of S.keys()) if (!keep.has(id)) S.delete(id); }
+  d.fd = [];
+  for (const [id, f] of S) { if (f.fade <= 0) { S.delete(id); continue; } d.fd.push([id, f.x, f.y, f.k, f.fade, 0, 0]); }
 }
 // local host actions
 function hostSet(patch) {
@@ -505,6 +565,7 @@ function onClientData(d) {
         const t = now(); if (V.lastAt) { const g = Math.min(400, t - V.lastAt); V.gapM += (g - V.gapM) * 0.1; V.gapD += (Math.abs(g - V.gapM) - V.gapD) * 0.1; } V.lastAt = t;
         V.idelay = clamp(V.gapM + 2.5 * V.gapD + 4, INTERP_MIN, INTERP_MAX);
       } else V.idelay = HOST_INTERP;
+      if (role === 'client' && !d.fd) expandSnap(d);
       d.at = now(); V.snaps.push(d); if (V.snaps.length > 10) V.snaps.shift();
       V.ph = d.ph; V.tl = d.tl; V.cd = d.cd;
       for (const e of d.ev || []) onEat(e);
