@@ -178,7 +178,7 @@ body.urgent #urgentFx { display:block; animation:flash .6s ease-in-out infinite 
 .room-pill b { letter-spacing:.12em; }
 .room-k { font-size:.62rem; opacity:.8; }
 .room-ic { font-size:.85rem; }
-.room-join { font-size:.62rem; line-height:1.15; color:#fff; text-shadow:0 1px 2px rgba(0,0,0,.7); overflow:hidden; }
+.room-join { font-size:.62rem; line-height:1.15; color:#fff; text-shadow:0 1px 2px rgba(0,0,0,.7); flex:1 1 0; min-width:0; overflow-wrap:anywhere; }
 .room-join b { display:block; font-weight:800; }
 #roomTag:not([hidden]) ~ #board { top:110px; }
 body.urgent #board { animation:wiggle .35s ease-in-out infinite; }
@@ -196,6 +196,7 @@ body.urgent #board { animation:wiggle .35s ease-in-out infinite; }
   #roomTag { left:8px; right:8px; top:58px; width:auto; }
   .room-pill { font-size:.8rem; padding:1px 8px; }
   #roomTag:not([hidden]) ~ #board { top:94px; }
+  @media (max-width:340px) { .room-join { display:none; } }
   #board { left:8px; right:8px; top:62px; width:auto; box-shadow:4px 4px 0 var(--pink); }
   .board-head { padding:6px 10px; font-size:.85rem; }
   .chev { display:inline; color:#fff; }
