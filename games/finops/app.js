@@ -94,7 +94,7 @@ const makePeer = (id) => {
 
 /* ---------------- state ---------------- */
 let peer = null, role = null, room = '', myId = null, hostConn = null, joined = false, leaving = false;
-let lastHostMsg = 0, uConn = null;
+let lastHostMsg = 0, uConn = null, hostOpen = false;
 const H = { // host-only state
   conns: new Map(),   // pid -> {c, u, lastSeen}  (c = reliable/ordered channel, u = unordered channel for snapshots + input)
   byPeer: new Map(),  // peer id -> pid
@@ -376,9 +376,9 @@ function onHostConnection(c) {
     c.on('error', () => {}); return;
   }
   const pid = H.nextPid++;
-  const ent = { c, u: null, lastSeen: Date.now() };
+  const ent = { c, u: null, lastSeen: Date.now() + 30000 }; // grace while ICE/TURN negotiates; reset on open
   H.conns.set(pid, ent); H.byPeer.set(c.peer, pid);
-  c.on('open', () => { try { c.send({ t: 'hi', you: pid }); c.send(metaMsg()); } catch {} });
+  c.on('open', () => { ent.lastSeen = Date.now(); try { c.send({ t: 'hi', you: pid }); c.send(metaMsg()); } catch {} });
   c.on('data', (d) => hostHandle(pid, d));
   c.on('close', () => { if (H.conns.get(pid) === ent) dropClient(pid); });
   c.on('error', (er) => { if (er && er.type === 'not-open-yet') return; if (H.conns.get(pid) === ent) dropClient(pid); });
@@ -396,6 +396,12 @@ function hostSet(patch) {
 }
 
 /* ---------------- connection setup ---------------- */
+function startTicker(fn, ms) {
+  try {
+    const w = new Worker(URL.createObjectURL(new Blob([`setInterval(() => postMessage(0), ${ms});`], { type: 'text/javascript' })));
+    w.onmessage = () => fn(); return { w };
+  } catch { return { i: setInterval(fn, ms) }; }
+}
 function destroyPeer() { if (peer) { const p = peer; peer = null; try { p.destroy(); } catch {} } }
 function createRoom(tries = 0) {
   if (!LOCAL_BUS && typeof Peer === 'undefined') { $('#homeError').textContent = 'Could not load the real-time library. Check your connection and reload.'; return; }
@@ -404,62 +410,81 @@ function createRoom(tries = 0) {
   const p = makePeer(PREFIX + room); peer = p;
   p.on('open', () => {
     if (peer !== p) return;
-    myId = 0; history.replaceState(null, '', '?room=' + room + (LOCAL_BUS ? '&local=1' : ''));
-    H.lastT = now(); H.timer = setInterval(hostTick, TICK_MS);
+    if (p.opened && myId === 0) return; // reconnect after a signalling drop
+    p.opened = true; myId = 0; history.replaceState(null, '', '?room=' + room + (LOCAL_BUS ? '&local=1' : ''));
+    H.lastT = now(); H.timer = startTicker(hostTick, TICK_MS);
     showPick();
   });
   p.on('connection', (c) => { if (peer === p) onHostConnection(c); });
-  p.on('disconnected', () => { if (peer === p && !p.destroyed) setTimeout(() => { try { p.reconnect(); } catch {} }, 1500); });
+  let rc = 0;
+  const reconn = () => { if (peer !== p || p.destroyed || !p.disconnected) { rc = 0; return; } try { p.reconnect(); } catch {} setTimeout(reconn, Math.min(15000, 1500 * 2 ** rc++)); };
+  p.on('disconnected', () => { if (peer === p && !p.destroyed) setTimeout(reconn, 1000); }); // same id, so the room code keeps working
   p.on('error', (err) => {
     if (peer !== p) return;
+    if (p.opened || myId === 0) return; // room already running: signalling errors are retried by reconn(), never by a new room
     if (err.type === 'unavailable-id' && tries < 4) { createRoom(tries + 1); return; }
     if (err.type === 'peer-unavailable' || err.type === 'network' || err.type === 'server-error') return; // ignore stray errors once running
     $('#createBtn').disabled = false; $('#createBtn').textContent = 'Create a tank';
     $('#homeError').textContent = "Can't reach the room server. Your network may be blocking it. Try another network.";
   });
 }
-function joinRoom(code) {
+const JOIN_TRIES = 4, JOIN_TIMEOUT_MS = 15000, JOIN_BACKOFF = [0, 1500, 3500, 6000];
+function joinRoom(code, attempt = 0) {
   if (!LOCAL_BUS && typeof Peer === 'undefined') { $('#homeError').textContent = 'Could not load the real-time library. Check your connection and reload.'; return; }
-  destroyPeer(); role = 'client'; room = code;
-  $('#homeError').textContent = 'Swimming over to ' + code + '…';
-  const p = makePeer(); peer = p;
+  destroyPeer(); role = 'client'; room = code; hostConn = null; uConn = null; hostOpen = false; lastHostMsg = 0;
+  clearTimeout(joinRoom.t); clearTimeout(joinRoom.retry);
+  $('#homeError').textContent = attempt ? `Couldn't reach the room, retrying… (${attempt + 1}/${JOIN_TRIES})` : 'Swimming over to ' + code + '…';
+  const p = makePeer(); peer = p; let done = false;
+  // a connect that fails or stalls before it ever opened is a network problem, not the host leaving: retry with backoff
+  const fail = (why) => {
+    if (done || peer !== p || hostOpen) return; done = true; clearTimeout(joinRoom.t);
+    if (why === 'notfound') { destroyPeer(); role = null; showHome(); $('#homeError').textContent = `Room ${code} not found. Check the code, or create a new tank.`; return; }
+    if (attempt + 1 < JOIN_TRIES) { $('#homeError').textContent = `Couldn't reach the room, retrying… (${attempt + 2}/${JOIN_TRIES})`; joinRoom.retry = setTimeout(() => joinRoom(code, attempt + 1), JOIN_BACKOFF[attempt + 1]); return; }
+    destroyPeer(); role = null; showHome();
+    $('#homeError').textContent = why === 'server' ? "Can't reach the room server. Your network may be blocking it. Try another network."
+      : `Couldn't connect to room ${code}. The network may be slow or blocking it. Try again in a moment.`;
+  };
+  joinRoom.t = setTimeout(() => fail('timeout'), JOIN_TIMEOUT_MS + attempt * 5000); // relay (TURN) connects can take several seconds
   p.on('open', () => {
     if (peer !== p) return;
     const c = p.connect(PREFIX + code, { reliable: true, serialization: 'json' }); hostConn = c;
     c.on('open', () => {
-      if (hostConn !== c) return; lastHostMsg = Date.now(); history.replaceState(null, '', '?room=' + code + (LOCAL_BUS ? '&local=1' : ''));
+      if (hostConn !== c) return; hostOpen = true; done = true; clearTimeout(joinRoom.t); lastHostMsg = Date.now(); history.replaceState(null, '', '?room=' + code + (LOCAL_BUS ? '&local=1' : ''));
       // second, unordered channel for snapshots + steering so one late packet doesn't hold up the newer ones behind it
       try { const u = p.connect(PREFIX + code, { reliable: false, serialization: 'json', label: 'u' });
         u.on('open', () => { if (hostConn === c) uConn = u; }); u.on('data', (d) => { if (hostConn === c) { lastHostMsg = Date.now(); onClientData(d); } });
         u.on('close', () => { if (uConn === u) uConn = null; }); u.on('error', () => { if (uConn === u) uConn = null; }); } catch {}
     });
     c.on('data', (d) => { if (hostConn === c) { lastHostMsg = Date.now(); onClientData(d); } });
-    c.on('close', () => { if (hostConn === c) hostLeft(); });
-    c.on('error', () => { if (hostConn === c) hostLeft(); });
+    c.on('close', () => { if (hostConn !== c) return; if (hostOpen) hostLeft(); else fail('net'); });
+    c.on('error', (er) => { if (hostConn !== c || (er && er.type === 'not-open-yet')) return; if (hostOpen) hostLeft(); else fail('net'); });
   });
+  p.on('disconnected', () => { if (peer === p && !p.destroyed && hostOpen) setTimeout(() => { try { if (peer === p && p.disconnected) p.reconnect(); } catch {} }, 1000); }); // signalling only; data channel keeps working
   p.on('error', (err) => {
     if (peer !== p) return;
-    if (err.type === 'peer-unavailable' && !lastHostMsg) { destroyPeer(); showHome(); $('#homeError').textContent = `No tank called ${code}. Check the code, or create a new tank.`; return; }
-    if (!lastHostMsg) { $('#homeError').textContent = "Can't reach the room server. Your network may be blocking it. Try another network."; }
+    if (hostOpen) return; // connected: signalling hiccups don't matter
+    if (err.type === 'peer-unavailable') fail('notfound');
+    else if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error' || err.type === 'socket-closed') fail('server');
+    else fail('net');
   });
 }
 function hostLeft() {
-  if (leaving || role !== 'client' || !hostConn) return;
+  if (leaving || role !== 'client' || !hostConn || !hostOpen) return;
   hostConn = null; uConn = null; destroyPeer();
   showMsg('The host left the tank', 'This game ended because the host closed their page. Start a new tank to keep playing.');
 }
 function send(m) {
   if (role === 'host') { if (m.t === 'ready') { const p = H.players.get(0); if (p) { p.ready = !!m.v; bumpMeta(); } } else if (m.t === 'in') { const p = H.players.get(0); if (p) { p.ax = m.x; p.ay = m.y; p.inAt = Date.now(); } } else if (m.t === 'hello') hostHello(m); return; }
   const ch = m.t === 'in' && uConn && uConn.open ? uConn : hostConn;
-  if (ch) try { ch.send(m); } catch {}
+  if (ch && ch.open) try { ch.send(m); } catch {} // sending before 'open' makes PeerJS emit a 'not-open-yet' error on the connection
 }
 function hostHello(m) {
   if (H.players.has(0)) return;
   if (fishTaken(m.sp, m.c)) { onClientData({ t: 'taken' }); return; }
   addPlayer(0, { name: cleanName(m.name) || 'Host', sp: m.sp, c: m.c }); onClientData({ t: 'welcome', id: 0 });
 }
-setInterval(() => { if (role === 'client' && lastHostMsg && hostConn && Date.now() - lastHostMsg > 7000) hostLeft(); }, 1000);
-setInterval(() => { if (role === 'client' && hostConn) send({ t: 'p', c: now() }); }, 1000); // keep-alive + round-trip time
+setInterval(() => { if (role === 'client' && hostOpen && lastHostMsg && hostConn && Date.now() - lastHostMsg > 12000) hostLeft(); }, 1000);
+setInterval(() => { if (role === 'client' && hostConn && hostOpen) send({ t: 'p', c: now() }); }, 1000); // keep-alive + round-trip time
 
 /* ---------------- client: messages ---------------- */
 function onClientData(d) {
@@ -497,7 +522,7 @@ function onClientData(d) {
 /* ---------------- UI: screens ---------------- */
 function setScreen(name) { document.body.className = 'screen-' + name + (document.body.classList.contains('urgent') ? ' urgent' : ''); }
 function showHome() {
-  setScreen('home'); $('#home').hidden = false; $('#pick').hidden = true; $('#hud').hidden = true; $('#board').hidden = true; $('#lobbyBar').hidden = true; $('#endScreen').hidden = true; $('#msg').hidden = true;
+  setScreen('home'); $('#home').hidden = false; $('#pick').hidden = true; $('#hud').hidden = true; $('#board').hidden = true; $('#roomTag').hidden = true; $('#lobbyBar').hidden = true; $('#endScreen').hidden = true; $('#msg').hidden = true;
   $('#createBtn').disabled = false; $('#createBtn').textContent = 'Create a tank';
 }
 let pickSp = null, pickC = null;
@@ -552,7 +577,7 @@ function dive() {
   setTimeout(() => { $('#diveBtn').disabled = false; }, 2500);
 }
 function showGame() {
-  setScreen('game'); $('#pick').hidden = true; $('#hud').hidden = false; $('#board').hidden = false;
+  setScreen('game'); $('#pick').hidden = true; $('#hud').hidden = false; $('#board').hidden = false; showRoomTag();
   if (matchMedia('(max-width: 720px)').matches) setBoardCollapsed(true);
   renderMetaUI();
 }
@@ -1259,6 +1284,15 @@ function updateHud(players, t) {
 }
 
 /* ---------------- copy helpers / wiring ---------------- */
+// room code above the leaderboard so friends can join mid-game
+function showRoomTag() { const el2 = $('#roomTag'); if (!room) { el2.hidden = true; return; } $('#roomCode').textContent = room; el2.hidden = false; }
+$('#roomCopy').addEventListener('click', async () => {
+  const txt = room; let ok = false;
+  try { await navigator.clipboard.writeText(txt); ok = true; } catch {
+    try { const ta = document.createElement('textarea'); ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); ok = document.execCommand('copy'); ta.remove(); } catch {}
+  }
+  toast(ok ? `Copied! Room ${txt}` : `Room code: ${txt}`);
+});
 function toast(msg) { const tt = $('#toast'); tt.textContent = msg; tt.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => tt.classList.remove('show'), 1600); }
 async function copy(text, label) {
   try { await navigator.clipboard.writeText(text); }
@@ -1269,7 +1303,7 @@ const inviteLink = () => location.origin + location.pathname + '?room=' + room +
 $('#copyCodeBtn').onclick = $('#pickCode').onclick = $('#menuCopy').onclick = () => copy(room, 'Room code ' + room);
 $('#copyLinkBtn').onclick = $('#menuLink').onclick = () => copy(inviteLink(), 'Invite link');
 $('#createBtn').onclick = () => createRoom();
-$('#joinForm').onsubmit = (e) => { e.preventDefault(); const c = cleanCode($('#codeInput').value); if (c.length < 4) { $('#homeError').textContent = 'Room codes are 5 letters.'; return; } joinRoom(c); };
+$('#joinForm').onsubmit = (e) => { e.preventDefault(); const c = cleanCode($('#codeInput').value); if (c.length !== 5) { $('#homeError').textContent = 'Room codes are 5 letters (no numbers, and no I, L or O).'; return; } joinRoom(c); };
 $('#codeInput').addEventListener('input', (e) => { e.target.value = cleanCode(e.target.value); });
 $('#diveBtn').onclick = dive;
 $('#nameInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') dive(); });
