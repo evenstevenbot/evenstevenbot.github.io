@@ -173,14 +173,12 @@ body.urgent #urgentFx { display:block; animation:flash .6s ease-in-out infinite 
 @keyframes slide { to { background-position:45px 0; } }
 #roomTag { position:fixed; right:12px; top:68px; width:300px; z-index:16; display:flex; align-items:center; gap:8px; pointer-events:none; }
 #roomTag[hidden] { display:none; }
-.room-pill { pointer-events:auto; display:inline-flex; align-items:center; gap:6px; font:inherit; font-family:'Bungee',system-ui,sans-serif; font-size:.9rem; color:var(--black); background:var(--yellow,#FFE600); border:3px solid var(--black); border-radius:999px; padding:2px 10px; box-shadow:3px 3px 0 var(--pink); cursor:pointer; white-space:nowrap; }
+.room-pill { pointer-events:auto; display:inline-flex; align-items:center; gap:6px; font:inherit; font-family:'Bungee',system-ui,sans-serif; font-size:1.7rem; line-height:1.1; color:var(--black); background:var(--yellow,#FFE600); border:3px solid var(--black); border-radius:999px; padding:4px 14px; box-shadow:3px 3px 0 var(--pink); cursor:pointer; white-space:nowrap; }
 .room-pill:active { transform:translate(2px,2px); box-shadow:1px 1px 0 var(--pink); }
 .room-pill b { letter-spacing:.12em; }
-.room-k { font-size:.62rem; opacity:.8; }
-.room-ic { font-size:.85rem; }
-.room-join { font-size:.62rem; line-height:1.15; color:#fff; text-shadow:0 1px 2px rgba(0,0,0,.7); flex:1 1 0; min-width:0; overflow-wrap:anywhere; }
-.room-join b { display:block; font-weight:800; }
-#roomTag:not([hidden]) ~ #board { top:110px; }
+.room-k { font-size:.7rem; opacity:.8; }
+.room-ic { font-size:1rem; }
+#roomTag:not([hidden]) ~ #board { top:124px; }
 body.urgent #board { animation:wiggle .35s ease-in-out infinite; }
 @keyframes wiggle { 25% { transform:rotate(-.6deg); } 75% { transform:rotate(.6deg); } }
 
@@ -194,9 +192,8 @@ body.urgent #board { animation:wiggle .35s ease-in-out infinite; }
   .menu-btn { width:44px; height:44px; }
   #menu { top:62px; }
   #roomTag { left:8px; right:8px; top:58px; width:auto; }
-  .room-pill { font-size:.8rem; padding:1px 8px; }
-  #roomTag:not([hidden]) ~ #board { top:94px; }
-  @media (max-width:340px) { .room-join { display:none; } }
+  .room-pill { font-size:1.45rem; padding:2px 12px; }
+  #roomTag:not([hidden]) ~ #board { top:110px; }
   #board { left:8px; right:8px; top:62px; width:auto; box-shadow:4px 4px 0 var(--pink); }
   .board-head { padding:6px 10px; font-size:.85rem; }
   .chev { display:inline; color:#fff; }

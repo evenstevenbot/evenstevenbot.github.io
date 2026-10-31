@@ -16,8 +16,8 @@ const FISH_LEN = 110, FISH_HT = FISH_LEN * 208 / 268;
 const MAX_SIZE = 2.6, GROW = 1.1;
 const TICK_MS = 33, SNAP_EVERY = 2, INTERP_MAX = 150, INTERP_MIN = 50, HOST_INTERP = 45;
 const FOOD_R = 9, PILL_R = 18;
-// flakes / second (scaled by player count). Round 2: 20% less food at every level (was 1.1 / 2.1 / 3.6).
-const FOOD_RATE = { low: 0.88, med: 1.68, high: 2.88 };
+// flakes / second (scaled by player count). Round 2: 20% less food (was 1.1 / 2.1 / 3.6); round 5: another 20% less (was 0.88 / 1.68 / 2.88).
+const FOOD_RATE = { low: 0.704, med: 1.344, high: 2.304 };
 const DEFAULTS = { mode: 'timer', min: 1, goal: 20, food: 'med', pw: true, fp: true, fg: false };
 // Magic pill power-up: one at a time, every 25-40 s at random; powered fish is 2x with metal jaws for up to 15 s.
 const PILL_GAP = [25000, 40000], PW_MS = 15000, PW_WARN = 3000;
@@ -1211,15 +1211,27 @@ function drawBursts(t) {
 }
 // off-screen pointer to the pill, drawn in screen space
 function drawPillArrow(pill, t) {
-  const sx = (pill.x - cam.x) * cam.z + VW / 2, sy = (pill.y - cam.y) * cam.z + VH / 2, m = 66;
+  // off-screen indicator: subtle white "POW UP" box + pink arrow (14px gap from the box edge), no pulse
+  const BW = 90, BH = 28, SH = 3, GAP = 14, AL = 30, AW = 21; // box size, arrow gap / length / half-width
+  const sx = (pill.x - cam.x) * cam.z + VW / 2, sy = (pill.y - cam.y) * cam.z + VH / 2;
   if (sx > 0 && sx < VW && sy > 0 && sy < VH) return;
-  const cx = VW / 2, cy = VH / 2, dx = sx - cx, dy = sy - cy, sc = Math.min((VW / 2 - m) / Math.abs(dx || 1e-6), (VH / 2 - m) / Math.abs(dy || 1e-6));
-  const ax = cx + dx * sc, ay = cy + dy * sc, ang = Math.atan2(dy, dx), pul = REDUCED ? 1 : 1 + 0.12 * Math.sin(t / 120);
-  ctx.save(); ctx.translate(ax, ay); ctx.scale(pul, pul);
-  ctx.fillStyle = 'rgba(17,17,40,.8)'; ctx.strokeStyle = '#00E5FF'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 0, 28, 0, 7); ctx.fill(); ctx.stroke();
-  ctx.save(); ctx.rotate(ang); ctx.lineJoin = 'round'; ctx.beginPath(); ctx.moveTo(48, 0); ctx.lineTo(24, -17); ctx.lineTo(24, 17); ctx.closePath();
+  const mx = BW / 2 + GAP + AL + SH + 8, my = BH / 2 + GAP + AL + SH + 8; // keep box + arrow tip fully on screen
+  const cx = VW / 2, cy = VH / 2, dx = sx - cx, dy = sy - cy, sc = Math.min((VW / 2 - mx) / Math.abs(dx || 1e-6), (VH / 2 - my) / Math.abs(dy || 1e-6));
+  let ax = cx + dx * sc, ay = cy + dy * sc;
+  // slide below any HUD panel (leaderboard, room code, timer, menu) it would sit under
+  if (!drawPillArrow.at || t - drawPillArrow.at > 250) { drawPillArrow.at = t; drawPillArrow.hud = ['#board', '#roomTag', '.timer-pill', '.menu-btn'].map((q) => document.querySelector(q)).filter((e) => e && !e.hidden).map((e) => e.getBoundingClientRect()).filter((r) => r.width > 0 && r.height > 0); }
+  for (const r of drawPillArrow.hud) if (ax + mx > r.left && ax - mx < r.right && ay + my > r.top && ay - my < r.bottom) ay = Math.min(VH - my, Math.max(ay, r.bottom + my));
+  if (QS.has('test')) window.__ind = { x: Math.round(ax), y: Math.round(ay) };
+  const ang = Math.atan2(sy - ay, sx - ax), c = Math.abs(Math.cos(ang)), si = Math.abs(Math.sin(ang));
+  const edge = Math.min(c > 1e-6 ? BW / 2 / c : 1e9, si > 1e-6 ? BH / 2 / si : 1e9), base = edge + GAP;
+  ctx.save(); ctx.translate(ax, ay);
+  // styled like the .timer-pill (white, #111 outline, pink offset shadow, dark Bungee text), scaled ~55%
+  const box = (ox) => { ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(-BW / 2 + ox, -BH / 2 + ox, BW, BH, 8); else ctx.rect(-BW / 2 + ox, -BH / 2 + ox, BW, BH); };
+  ctx.fillStyle = '#FF2E88'; box(SH); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.strokeStyle = '#111'; ctx.lineWidth = 3; box(0); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#111'; ctx.font = "14px Bungee, Fredoka, sans-serif"; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('POW UP', 0, 1);
+  ctx.save(); ctx.rotate(ang); ctx.lineJoin = 'round'; ctx.beginPath(); ctx.moveTo(base + AL, 0); ctx.lineTo(base, -AW); ctx.lineTo(base, AW); ctx.closePath();
   ctx.strokeStyle = '#111'; ctx.lineWidth = 7; ctx.stroke(); ctx.fillStyle = '#FF2E88'; ctx.fill(); ctx.strokeStyle = '#00E5FF'; ctx.lineWidth = 2.5; ctx.stroke(); ctx.restore();
-  const P = pillSprites(); ctx.rotate(-0.3); ctx.drawImage(P.cap, -P.cw * 0.6, -P.ch * 0.6, P.cw * 1.2, P.ch * 1.2);
   ctx.restore();
 }
 // tank-wide alert when a new pill appears (works for host + clients, and late joiners)
