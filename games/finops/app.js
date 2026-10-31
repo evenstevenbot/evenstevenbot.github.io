@@ -14,7 +14,9 @@ const MAX_PLAYERS = 20;
 const WORLD_W = 1760, WORLD_H = 1100, SAND_H = 70; // ~12% smaller tank (was 2000 x 1250)
 const FISH_LEN = 110, FISH_HT = FISH_LEN * 208 / 268;
 const MAX_SIZE = 2.6, GROW = 1.1;
-const TICK_MS = 33, SNAP_EVERY = 2, INTERP_MAX = 150, INTERP_MIN = 50, HOST_INTERP = 45;
+const TICK_MS = 33, INTERP_MAX = 150, HOST_INTERP = 45;
+// snapshots every tick (30/s) up to FAST_ROOM players, every other tick (15/s) above; the smoothing floor follows the rate
+const FAST_ROOM = 6, snapEveryFor = (n) => (n <= FAST_ROOM ? 1 : 2), interpMinFor = (se) => (se === 1 ? 40 : 50);
 const FOOD_R = 9, PILL_R = 18;
 // flakes / second (scaled by player count). Round 2: 20% less food (was 1.1 / 2.1 / 3.6); round 5: another 20% less (was 0.88 / 1.68 / 2.88).
 const FOOD_RATE = { low: 0.704, med: 1.344, high: 2.304 };
@@ -36,6 +38,21 @@ const IS_LOCAL = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
 const QS = new URLSearchParams(location.search);
 const LOCAL_BUS = IS_LOCAL && QS.has('local');
 const peerOpts = { debug: 0, config: { iceServers: STUN_SERVERS.concat(TURN_SERVERS) } };
+// Fast lane: PeerJS only sets {ordered:false} for reliable:false, which still retransmits every lost packet.
+// Make the 'u' channel truly fire-and-forget (newer snapshots / inputs replace lost ones); fall back if refused.
+const FAST = { noRetx: null };
+if (window.RTCPeerConnection && RTCPeerConnection.prototype.createDataChannel) {
+  const origDC = RTCPeerConnection.prototype.createDataChannel;
+  RTCPeerConnection.prototype.createDataChannel = function (label, opts) {
+    if (label === 'u') {
+      try { const ch = origDC.call(this, label, { ...(opts || {}), ordered: false, maxRetransmits: 0 }); FAST.noRetx = ch.maxRetransmits === 0; return ch; }
+      catch { FAST.noRetx = false; }
+    }
+    return origDC.call(this, label, opts);
+  };
+}
+// ?test=1&loss=20 drops that % of fast-lane messages in both directions (loss simulation for tests)
+const LOSS = QS.has('test') ? +QS.get('loss') || 0 : 0, lossy = () => LOSS > 0 && Math.random() * 100 < LOSS;
 const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
 // Mouse steering is off by default (keyboard only); touch steering stays on so phones are playable. ?mouse=1 re-enables it.
 const MOUSE_ON = QS.get('mouse') === '1';
@@ -126,7 +143,7 @@ function metaMsg() {
 }
 function broadcastMeta() { const m = metaMsg(); sendAll(m); onClientData(m); }
 function sendAll(m) { for (const { c } of H.conns.values()) if (c.open) try { c.send(m); } catch {} }
-function sendSnap(m) { for (const e of H.conns.values()) { const ch = e.u && e.u.open ? e.u : e.c; if (ch.open) try { ch.send(m); } catch {} } }
+function sendSnap(m) { for (const e of H.conns.values()) { const ch = e.u && e.u.open ? e.u : e.c; if (ch === e.u && lossy()) continue; if (ch.open) try { ch.send(m); } catch {} } }
 function fxAll(m) { m.t = 'fx'; sendAll(m); onClientData(m); } // reliable one-off effects (pill swallowed, chomp, power ended)
 
 function resetRound() {
@@ -344,7 +361,8 @@ function hostTick() {
   H.tick++;
   const pl = H.pill;
   // compact snapshot; eat events ride along in the next 3 snapshots so a lost/reordered packet can't drop one
-  H.ev = H.ev.filter((e) => H.tick - e[5] <= SNAP_EVERY * 3);
+  H.se = snapEveryFor(H.players.size);
+  H.ev = H.ev.filter((e) => H.tick - e[5] <= 6); // ~3 snapshots at 15/s, ~6 at 30/s
   const snap = { t: 's', n: H.tick, ph: H.ph, tl: timeLeft(), cd: H.ph === 'countdown' ? Math.max(0, H.cdEnd - Date.now()) : 0,
     p: all.map((p) => [p.id, Math.round(p.x), Math.round(p.y), +p.size.toFixed(3), p.score, p.f, +p.a.toFixed(2), Math.round(p.vx), Math.round(p.vy), p.out ? 1 : 0, p.pw ? Math.max(1, p.pw - nowMs) : 0]),
     fd: H.foods.map((f) => [f.id, Math.round(f.x), Math.round(f.y), f.k, +f.fade.toFixed(2), f.capd ? f.cap + 1 : 0, f.capd ? Date.now() - f.capAt : 0]),
@@ -352,7 +370,7 @@ function hostTick() {
     ev: H.ev.map((e) => e.slice(0, 5)) };
   onClientData(snap);
   if (QS.has('test')) { (H.fpos || (H.fpos = new Map())).set(H.tick, H.foods.map((f) => [f.id, f.x, f.y, f.near ? 1 : 0])); H.fpos.delete(H.tick - 400); }
-  if (H.tick % SNAP_EVERY === 0) { const w = wireSnap(snap, all, nowMs); if (QS.has('test')) { H.bytesWire = JSON.stringify(w).length; H.bytesFull = JSON.stringify(snap).length; } sendSnap(w); }
+  if (H.tick % H.se === 0) { H.sent = (H.sent || 0) + 1; const w = wireSnap(snap, all, nowMs); if (QS.has('test')) { H.bytesWire = JSON.stringify(w).length; H.bytesFull = JSON.stringify(snap).length; } sendSnap(w); }
 }
 
 function dropClient(pid) {
@@ -375,7 +393,7 @@ function hostHandle(pid, d) {
       break;
     }
     case 'in': if (p) { const q = +d.q || 0; if (q && q <= p.inQ) break; p.inQ = q; p.ax = clamp(+d.x || 0, -1, 1); p.ay = clamp(+d.y || 0, -1, 1); p.inAt = Date.now(); } break;
-    case 'p': if (d.c != null) try { e.c.send({ t: 'po', c: d.c }); } catch {} break;
+    case 'p': if (p && d.r != null) p.net = { r: +d.r || 0, k: String(d.k || '').slice(0, 6) }; if (d.c != null) try { e.c.send({ t: 'po', c: d.c }); } catch {} break;
     case 'ready': if (p) { p.ready = !!d.v; bumpMeta(); } break;
     case 'bye': try { e.c.close(); } catch {} dropClient(pid); break;
   }
@@ -399,27 +417,27 @@ function onHostConnection(c) {
 // or every flake right after someone connects. Clients replay the rest of each flake's fall from its seed.
 const fEnt = (f) => [f.id, f.k, f.seed, f.rs, Math.round(f.x * 10), Math.round(f.y * 10), Math.round(f.dvx * 10), Math.round(f.t * 1000), Math.round(f.dart * 1000), Math.round(f.fade * 100)];
 function wireSnap(s, all, nowMs) {
-  const w = { t: 's', n: s.n, ph: s.ph, tl: s.tl, cd: s.cd, pl: s.pl, ev: s.ev,
+  const w = { t: 's', r: H.se, n: s.n, ph: s.ph, tl: s.tl, cd: s.cd, pl: s.pl, ev: s.ev,
     p: all.map((p) => [p.id, Math.round(p.x), Math.round(p.y), +p.size.toFixed(3), p.score, p.f, p.out ? 1 : 0, p.pw ? Math.max(1, p.pw - nowMs) : 0]) };
-  const live = H.foods.filter((f) => !f.capd), n = H.tick, win = SNAP_EVERY * 3, full = H.fullFood > 0;
+  const live = H.foods.filter((f) => !f.capd), n = H.tick, win = H.se * 3, full = H.fullFood > 0;
   if (full) H.fullFood--;
   const out = [];
   // f.sh = the host's copy of exactly what clients are replaying; only resend when the real flake has strayed from it
   for (const f of live) {
-    const why = !f.sh ? 'new' : full ? 'full' : f.rep && n - f.sentT <= SNAP_EVERY ? 'again' : Math.hypot(f.x - f.sh.x, f.y - f.sh.y) > 0.75 ? 'drift' : '';
+    const why = !f.sh ? 'new' : full ? 'full' : f.rep && n - f.sentT <= H.se ? 'again' : Math.hypot(f.x - f.sh.x, f.y - f.sh.y) > 0.75 ? 'drift' : '';
     if (why) { out.push(f); f.rep = why === 'new' || why === 'drift'; // new/corrected flakes go out twice (unreliable channel)
       if (QS.has('test')) { const W = H.why || (H.why = {}); W[why] = (W[why] || 0) + 1; } }
   }
   for (let i = 0, c = 0; live.length && i < live.length && c < 2; i++) { const f = live[(H.rr = ((H.rr || 0) + 1) % live.length)]; if (!out.includes(f)) { out.push(f); c++; } }
   if (out.length) w.fs = out.map((f) => { const e = fEnt(f); f.sentT = n; f.sh = applyEnt(flakeFromSeed(e[0], e[1], e[2]), e); return e; });
-  if (full || n % 30 === 0) w.fa = live.map((f) => f.id);
+  if (full || Math.floor(n / H.se) % 10 === 0) w.fa = live.map((f) => f.id); // live-id list every 10th snapshot clears any flake whose eat event was lost
   return w;
 }
 const applyEnt = (f, e) => Object.assign(f, { rs: e[3], x: e[4] / 10, y: e[5] / 10, dvx: e[6] / 10, t: e[7] / 1000, dart: e[8] / 1000, fade: e[9] / 100 });
 function expandSnap(d) {
   const prev = V.snaps[V.snaps.length - 1];
   const pm = prev && prev.p ? new Map(prev.p.map((q) => [q[0], q])) : new Map();
-  const dts = prev && prev.n != null ? Math.max(1, d.n - prev.n) * FDT : SNAP_EVERY * FDT;
+  const dts = prev && prev.n != null ? Math.max(1, d.n - prev.n) * FDT : (d.r || 2) * FDT;
   d.p = (d.p || []).map((q) => {
     const o = pm.get(q[0]); let vx = 0, vy = 0, a = 0;
     if (o && !q[6] && !o[9]) { vx = (q[1] - o[1]) / dts; vy = (q[2] - o[2]) / dts; a = o[6]; }
@@ -538,6 +556,7 @@ function hostLeft() {
 function send(m) {
   if (role === 'host') { if (m.t === 'ready') { const p = H.players.get(0); if (p) { p.ready = !!m.v; bumpMeta(); } } else if (m.t === 'in') { const p = H.players.get(0); if (p) { p.ax = m.x; p.ay = m.y; p.inAt = Date.now(); } } else if (m.t === 'hello') hostHello(m); return; }
   const ch = m.t === 'in' && uConn && uConn.open ? uConn : hostConn;
+  if (ch === uConn && lossy()) return;
   if (ch && ch.open) try { ch.send(m); } catch {} // sending before 'open' makes PeerJS emit a 'not-open-yet' error on the connection
 }
 function hostHello(m) {
@@ -546,7 +565,29 @@ function hostHello(m) {
   addPlayer(0, { name: cleanName(m.name) || 'Host', sp: m.sp, c: m.c }); onClientData({ t: 'welcome', id: 0 });
 }
 setInterval(() => { if (role === 'client' && hostOpen && lastHostMsg && hostConn && Date.now() - lastHostMsg > 12000) hostLeft(); }, 1000);
-setInterval(() => { if (role === 'client' && hostConn && hostOpen) send({ t: 'p', c: now() }); }, 1000); // keep-alive + round-trip time
+setInterval(() => { if (role === 'client' && hostConn && hostOpen) send({ t: 'p', c: now(), r: Math.round(V.rtt || 0), k: V.ctype || '' }); }, 1000); // keep-alive + round-trip time (+ our ping for the host's board)
+// connection type for the ping badge: selected ICE candidate pair, relay if either end is a TURN candidate
+async function connType(pc) {
+  const st = await pc.getStats(); let pair = null;
+  st.forEach((r) => { if (r.type === 'transport' && r.selectedCandidatePairId) pair = st.get(r.selectedCandidatePairId); });
+  if (!pair) st.forEach((r) => { if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') pair = r; });
+  if (!pair) return '';
+  const l = st.get(pair.localCandidateId), rm = st.get(pair.remoteCandidateId);
+  return (l && l.candidateType === 'relay') || (rm && rm.candidateType === 'relay') ? 'relay' : 'direct';
+}
+setInterval(async () => {
+  if (role !== 'client' || !hostConn || !hostOpen) return;
+  if (LOCAL_BUS) V.ctype = 'local'; else try { const pc = hostConn.peerConnection; if (pc) V.ctype = (await connType(pc)) || V.ctype || ''; } catch {}
+  renderNet();
+}, 2000);
+function renderNet() {
+  const b = $('#netTag'); if (!b) return;
+  if (role !== 'client' || !V.rtt) { b.hidden = true; return; }
+  const ms = Math.round(V.rtt); b.hidden = false;
+  b.className = 'net-tag ' + (ms < 80 ? 'good' : ms < 160 ? 'ok' : 'bad');
+  b.textContent = ms + ' ms' + (V.ctype ? ' · ' + V.ctype : '');
+  b.title = 'Your round trip to the host' + (V.ctype === 'relay' ? ' (through a relay server)' : V.ctype === 'direct' ? ' (direct connection)' : '');
+}
 
 /* ---------------- client: messages ---------------- */
 function onClientData(d) {
@@ -563,7 +604,7 @@ function onClientData(d) {
       if (role === 'client') { // unordered channel: drop stale snapshots, track arrival jitter for the interpolation delay
         if (d.n != null && d.n <= V.seq) break; V.seq = d.n != null ? d.n : V.seq;
         const t = now(); if (V.lastAt) { const g = Math.min(400, t - V.lastAt); V.gapM += (g - V.gapM) * 0.1; V.gapD += (Math.abs(g - V.gapM) - V.gapD) * 0.1; } V.lastAt = t;
-        V.idelay = clamp(V.gapM + 2.5 * V.gapD + 4, INTERP_MIN, INTERP_MAX);
+        V.se = d.r || 2; V.idelay = clamp(V.gapM + 2.5 * V.gapD + 4, interpMinFor(V.se), INTERP_MAX);
       } else V.idelay = HOST_INTERP;
       if (role === 'client' && !d.fd) expandSnap(d);
       d.at = now(); V.snaps.push(d); if (V.snaps.length > 10) V.snaps.shift();
@@ -574,7 +615,7 @@ function onClientData(d) {
       if (role === 'client') reconcile(d);
       break;
     }
-    case 'po': { const r = now() - d.c; if (r >= 0 && r < 5000) V.rtt = V.rtt ? V.rtt + (r - V.rtt) * 0.25 : r; break; }
+    case 'po': { const r = now() - d.c; if (r >= 0 && r < 5000) V.rtt = V.rtt ? V.rtt + (r - V.rtt) * 0.25 : r; renderNet(); break; }
     case 'fx': onFx(d); break;
     case 'welcome': myId = d.id; joined = true; showGame(); break;
     case 'taken': $('#pickError').textContent = 'Someone just grabbed that fish. Pick another!'; $('#diveBtn').disabled = false; renderPick(); break;
@@ -736,6 +777,8 @@ function renderBoard(players) {
     r.querySelector('.rk').textContent = i + 1;
     const img = r.querySelector('img'), src = window.FinFish.urlFor(m[1], m[2]); if (img.getAttribute('src') !== src) img.src = src;
     r.querySelector('.nm').textContent = (p.out ? '💥 ' : p.pw ? '🦈 ' : '') + m[0] + (p.id === myId ? ' · YOU' : '');
+    const hp = role === 'host' && p.id !== myId && H.players.get(p.id), net = hp && hp.net && hp.net.r ? hp.net : null;
+    let ng = r.querySelector('.ng'); if (net) { if (!ng) { ng = el('small', 'ng'); r.querySelector('.nm').after(ng); } ng.textContent = net.r + (net.k === 'relay' ? 'ms R' : 'ms'); ng.title = net.k ? net.k + ' connection' : ''; ng.className = 'ng ' + (net.r < 80 ? 'good' : net.r < 160 ? 'ok' : 'bad'); } else if (ng) ng.remove();
     r.querySelector('.bar i').style.width = Math.min(100, p.score / denom * 100) + '%';
     const pt = r.querySelector('.pt'); if (pt.textContent !== String(p.score)) { pt.textContent = p.score; pt.classList.remove('bump'); void pt.offsetWidth; pt.classList.add('bump'); }
   });
@@ -791,9 +834,9 @@ function steer(me) {
   x = Math.round(x * 20) / 20; y = Math.round(y * 20) / 20;
   if (me && me.out) x = y = 0;
   myIn = { x, y };
-  // send on change (at most every 30 ms) plus a 250 ms heartbeat; seq numbers let the host ignore reordered inputs
+  // send on change (at most every 30 ms) plus a heartbeat (100 ms while moving, 250 ms idle) since the fast lane can drop packets; seq numbers let the host ignore reordered inputs
   const t = Date.now();
-  if (x !== lastSent.x || y !== lastSent.y ? t - lastSent.at > 30 : t - lastSent.at > 250) sendIn(x, y);
+  if (x !== lastSent.x || y !== lastSent.y ? t - lastSent.at > 30 : t - lastSent.at > (x || y ? 100 : 250)) sendIn(x, y);
 }
 // immediate send on key changes so the first frame of a keypress isn't lost waiting for the next animation frame
 addEventListener('keydown', (e) => { if (joined && STEER_KEYS.includes(e.key.toLowerCase()) && !e.repeat && !isTyping(e.target)) steer(V.lastMe); });
