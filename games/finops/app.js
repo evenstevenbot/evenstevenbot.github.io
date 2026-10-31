@@ -1212,10 +1212,10 @@ function drawBursts(t) {
 // off-screen pointer to the pill, drawn in screen space
 function drawPillArrow(pill, t) {
   // off-screen indicator: subtle white "POW UP" box + pink arrow (14px gap from the box edge), no pulse
-  const BW = 76, BH = 28, GAP = 14, AL = 30, AW = 21; // box size, arrow gap / length / half-width
+  const BW = 90, BH = 28, SH = 3, GAP = 14, AL = 30, AW = 21; // box size, arrow gap / length / half-width
   const sx = (pill.x - cam.x) * cam.z + VW / 2, sy = (pill.y - cam.y) * cam.z + VH / 2;
   if (sx > 0 && sx < VW && sy > 0 && sy < VH) return;
-  const mx = BW / 2 + GAP + AL + 8, my = BH / 2 + GAP + AL + 8; // keep box + arrow tip fully on screen
+  const mx = BW / 2 + GAP + AL + SH + 8, my = BH / 2 + GAP + AL + SH + 8; // keep box + arrow tip fully on screen
   const cx = VW / 2, cy = VH / 2, dx = sx - cx, dy = sy - cy, sc = Math.min((VW / 2 - mx) / Math.abs(dx || 1e-6), (VH / 2 - my) / Math.abs(dy || 1e-6));
   let ax = cx + dx * sc, ay = cy + dy * sc;
   // slide below any HUD panel (leaderboard, room code, timer, menu) it would sit under
@@ -1225,9 +1225,11 @@ function drawPillArrow(pill, t) {
   const ang = Math.atan2(sy - ay, sx - ax), c = Math.abs(Math.cos(ang)), si = Math.abs(Math.sin(ang));
   const edge = Math.min(c > 1e-6 ? BW / 2 / c : 1e9, si > 1e-6 ? BH / 2 / si : 1e9), base = edge + GAP;
   ctx.save(); ctx.translate(ax, ay);
-  ctx.fillStyle = 'rgba(17,17,40,.35)'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
-  ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(-BW / 2, -BH / 2, BW, BH, 6); else ctx.rect(-BW / 2, -BH / 2, BW, BH); ctx.fill(); ctx.stroke();
-  ctx.fillStyle = '#fff'; ctx.font = "13px Bungee, Fredoka, sans-serif"; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('POW UP', 0, 1);
+  // styled like the .timer-pill (white, #111 outline, pink offset shadow, dark Bungee text), scaled ~55%
+  const box = (ox) => { ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(-BW / 2 + ox, -BH / 2 + ox, BW, BH, 8); else ctx.rect(-BW / 2 + ox, -BH / 2 + ox, BW, BH); };
+  ctx.fillStyle = '#FF2E88'; box(SH); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.strokeStyle = '#111'; ctx.lineWidth = 3; box(0); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#111'; ctx.font = "14px Bungee, Fredoka, sans-serif"; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('POW UP', 0, 1);
   ctx.save(); ctx.rotate(ang); ctx.lineJoin = 'round'; ctx.beginPath(); ctx.moveTo(base + AL, 0); ctx.lineTo(base, -AW); ctx.lineTo(base, AW); ctx.closePath();
   ctx.strokeStyle = '#111'; ctx.lineWidth = 7; ctx.stroke(); ctx.fillStyle = '#FF2E88'; ctx.fill(); ctx.strokeStyle = '#00E5FF'; ctx.lineWidth = 2.5; ctx.stroke(); ctx.restore();
   ctx.restore();
