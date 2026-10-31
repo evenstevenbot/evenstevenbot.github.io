@@ -11,14 +11,14 @@ const { COLORS, SPECIES } = window.FinFish;
 const PREFIX = 'evenstevenbot-finops-v1-';
 const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ';
 const MAX_PLAYERS = 20;
-const WORLD_W = 2000, WORLD_H = 1250, SAND_H = 70;
+const WORLD_W = 1760, WORLD_H = 1100, SAND_H = 70; // ~12% smaller tank (was 2000 x 1250)
 const FISH_LEN = 110, FISH_HT = FISH_LEN * 208 / 268;
 const MAX_SIZE = 2.6, GROW = 1.1;
 const TICK_MS = 33, SNAP_EVERY = 2, INTERP_MAX = 150, INTERP_MIN = 50, HOST_INTERP = 45;
 const FOOD_R = 9, PILL_R = 18;
 // flakes / second (scaled by player count). Round 2: 20% less food at every level (was 1.1 / 2.1 / 3.6).
 const FOOD_RATE = { low: 0.88, med: 1.68, high: 2.88 };
-const DEFAULTS = { mode: 'timer', min: 1, goal: 20, food: 'med', pw: true };
+const DEFAULTS = { mode: 'timer', min: 1, goal: 20, food: 'med', pw: true, fp: true, fg: false };
 // Magic pill power-up: one at a time, every 25-40 s at random; powered fish is 2x with metal jaws for up to 15 s.
 const PILL_GAP = [25000, 40000], PW_MS = 15000, PW_WARN = 3000;
 const NAME_KEY = 'finops-name', FISH_KEY = 'finops-fish';
@@ -94,7 +94,7 @@ const makePeer = (id) => {
 
 /* ---------------- state ---------------- */
 let peer = null, role = null, room = '', myId = null, hostConn = null, joined = false, leaving = false;
-let lastHostMsg = 0, uConn = null;
+let lastHostMsg = 0, uConn = null, hostOpen = false;
 const H = { // host-only state
   conns: new Map(),   // pid -> {c, u, lastSeen}  (c = reliable/ordered channel, u = unordered channel for snapshots + input)
   byPeer: new Map(),  // peer id -> pid
@@ -179,12 +179,12 @@ const CAP_MS = REDUCED ? 90 : 150;
 const faceOf = (p) => ({ x: Math.cos(p.a) * p.f, y: Math.sin(p.a) });
 // forgiving capture: anything whose own radius overlaps the mouth (drawn mouth position, same on host + clients)
 // is sucked in from any side; a little extra reach straight ahead of the face. No vacuuming from afar.
-const lipRadius = (size) => 12 + 7 * size;
+const lipRadius = (size) => 17 + 9 * size; // widened catch area
 const PILL_CAP_R = 26; // the pill's drawn capsule half-length (PILL_R * 1.45 scale)
 function inSuction(p, m, f, itemR = FOOD_R) {
   const dx = f.x - m.x, dy = f.y - m.y, d = Math.hypot(dx, dy), touch = lipRadius(p.size) + itemR;
   if (d <= touch) return true;
-  if (d > touch * 1.35) return false;
+  if (d > touch * 1.5) return false;
   const fc = faceOf(p); return (dx * fc.x + dy * fc.y) / (d || 1) >= SUCK_COS;
 }
 
@@ -207,9 +207,19 @@ function wallFish(p) {
   if (p.y < top) { p.y = top; p.vy = Math.abs(p.vy) * 0.5; } if (p.y > bot) { p.y = bot; p.vy = -Math.abs(p.vy) * 0.5; }
 }
 // falling + fluttering + shy of nearby mouths (flakes and the pill)
+// per-flake seeded RNG (mulberry32) so clients can replay a flake's fall exactly from its spawn state
+function frnd(f) { let t = (f.rs = (f.rs + 0x6D2B79F5) | 0); t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }
+const fr = (f, lo, hi) => (f.rs != null ? lo + frnd(f) * (hi - lo) : rand(lo, hi));
+const FDT = TICK_MS / 1000; // food always steps a fixed dt per host tick (deterministic on clients)
+function flakeFromSeed(id, k, seed) {
+  const f = { id, k, rs: seed | 0, dvx: 0, fade: 1, t: 0, y: -10 };
+  f.x = fr(f, 60, WORLD_W - 60); const fast = frnd(f) < 0.3; f.vy = fast ? fr(f, 150, 230) : fr(f, 40, 85);
+  f.drift = fr(f, -25, 25); f.wob = fr(f, 18, 55); f.wf = fr(f, 1.4, 3.2); f.ph = fr(f, 0, 6.28); f.dart = fr(f, 0.4, 1.5);
+  return f;
+}
 function moveFlake(f, dt, mouths, shy = 1) {
   f.t += dt; f.dart -= dt;
-  if (f.dart <= 0) { f.dart = rand(0.5, 1.6); f.dvx = rand(-1, 1) * rand(60, 140) * shy; }
+  if (f.dart <= 0) { f.dart = fr(f, 0.5, 1.6); f.dvx = fr(f, -1, 1) * fr(f, 60, 140) * shy; }
   f.dvx *= Math.exp(-2.5 * dt);
   let ev = 0, evy = 0, near = false;
   for (const [, m] of mouths) {
@@ -217,11 +227,13 @@ function moveFlake(f, dt, mouths, shy = 1) {
     if (d < 140) near = true;
     if (d < 95 * shy && d > 40) { const k = (1 - d / (95 * shy)) * 120 * shy; ev += dx / d * k; evy += dy / d * k * 0.4; }
   }
+  f.near = near;
   if (near) { ev *= 0.25; evy *= 0.25; f.dvx *= Math.exp(-6 * dt); } // close to a mouth: barely dodges, so it's catchable
   f.x += (f.drift + f.dvx + ev + Math.cos(f.t * f.wf + f.ph) * f.wob * f.wf * 0.5) * dt;
   f.y += (f.vy + evy) * dt;
   f.x = clamp(f.x, 15, WORLD_W - 15);
   if (f.y > WORLD_H - SAND_H + 5) f.fade -= dt * 1.5;
+  return f;
 }
 function spawnPill() {
   H.pill = { id: H.nextFood++, x: rand(160, WORLD_W - 160), y: -20, vy: rand(55, 80), drift: rand(-20, 20),
@@ -231,13 +243,11 @@ const pillGap = () => rand(PILL_GAP[0], PILL_GAP[1]);
 function powerUp(p) { p.pw = Date.now() + PW_MS; p.size = p.base * SHARK_X; fxAll({ k: 'pill', pid: p.id }); }
 function powerDown(p, why) { if (!p.pw) return; p.pw = 0; p.size = p.base; fxAll({ k: 'unpw', pid: p.id, why }); }
 function spawnFood() {
-  const gold = Math.random() < 0.2;
-  const fast = Math.random() < 0.3;
-  H.foods.push({
-    id: H.nextFood++, k: gold ? 2 : 1, x: rand(60, WORLD_W - 60), y: -10,
-    vy: fast ? rand(150, 230) : rand(40, 85), drift: rand(-25, 25),
-    wob: rand(18, 55), wf: rand(1.4, 3.2), ph: rand(0, 6.28), dart: rand(0.4, 1.5), dvx: 0, fade: 1, t: 0,
-  });
+  const fp = H.set.fp !== false, fg = !!H.set.fg;
+  const gold = fg && (!fp || Math.random() < 0.2); // flake types the host enabled; total rate unchanged
+  const seed = (Math.random() * 4294967296) | 0;
+  const f = flakeFromSeed(H.nextFood++, gold ? 2 : 1, seed); f.seed = seed; f.born = H.tick; f.nearT = -99;
+  H.foods.push(f);
 }
 function hostTick() {
   const t = now(); const dt = Math.min(0.08, (t - (H.lastT || t)) / 1000) || TICK_MS / 1000; H.lastT = t;
@@ -278,11 +288,11 @@ function hostTick() {
         if (!p || age >= CAP_MS) { f.fade = -1; continue; }
         const m = mouthOf(p), k = age / CAP_MS; f.x += (m.x - f.x) * k; f.y += (m.y - f.y) * k; continue;
       }
-      moveFlake(f, dt, mouths);
+      moveFlake(f, FDT, mouths); if (f.sh) moveFlake(f.sh, FDT, []);
       if (f.fade > 0 && f.y > 0) for (const [p, m] of mouths) {
         if (inSuction(p, m, f)) {
           f.capd = true; f.cap = p.id; f.capAt = Date.now(); p.score += f.k; p.eats++; p.lastScore = Date.now();
-          p.base = Math.min(MAX_SIZE, p.base * GROW); p.size = p.base * (p.pw ? SHARK_X : 1);
+          // fish no longer grow when they eat (size stays at base; shark is base*SHARK_X)
           H.ev.push([f.id, p.id, Math.round(f.x), Math.round(f.y), f.k, H.tick]); break;
         }
       }
@@ -341,7 +351,8 @@ function hostTick() {
     pl: pl ? [pl.id, Math.round(pl.x), Math.round(pl.y), +pl.fade.toFixed(2), pl.capd ? pl.cap + 1 : 0, pl.capd ? nowMs - pl.capAt : 0] : 0,
     ev: H.ev.map((e) => e.slice(0, 5)) };
   onClientData(snap);
-  if (H.tick % SNAP_EVERY === 0) sendSnap(snap);
+  if (QS.has('test')) { (H.fpos || (H.fpos = new Map())).set(H.tick, H.foods.map((f) => [f.id, f.x, f.y, f.near ? 1 : 0])); H.fpos.delete(H.tick - 400); }
+  if (H.tick % SNAP_EVERY === 0) { const w = wireSnap(snap, all, nowMs); if (QS.has('test')) { H.bytesWire = JSON.stringify(w).length; H.bytesFull = JSON.stringify(snap).length; } sendSnap(w); }
 }
 
 function dropClient(pid) {
@@ -360,7 +371,7 @@ function hostHandle(pid, d) {
       if (!validFish(sp, c)) return;
       if (H.players.size >= MAX_PLAYERS) { e.c.send({ t: 'full' }); return; }
       if (fishTaken(sp, c)) { e.c.send({ t: 'taken' }); return; }
-      addPlayer(pid, { name, sp, c }); e.c.send({ t: 'welcome', id: pid });
+      addPlayer(pid, { name, sp, c }); e.c.send({ t: 'welcome', id: pid }); H.fullFood = 3;
       break;
     }
     case 'in': if (p) { const q = +d.q || 0; if (q && q <= p.inQ) break; p.inQ = q; p.ax = clamp(+d.x || 0, -1, 1); p.ay = clamp(+d.y || 0, -1, 1); p.inAt = Date.now(); } break;
@@ -371,17 +382,67 @@ function hostHandle(pid, d) {
 }
 function onHostConnection(c) {
   if (c.label === 'u') { // second, unordered channel from an already-connected player
-    c.on('open', () => { const pid = H.byPeer.get(c.peer), e = pid != null && H.conns.get(pid); if (!e) { try { c.close(); } catch {} return; } e.u = c;
+    c.on('open', () => { const pid = H.byPeer.get(c.peer), e = pid != null && H.conns.get(pid); if (!e) { try { c.close(); } catch {} return; } e.u = c; H.fullFood = 3;
       c.on('data', (d) => hostHandle(pid, d)); c.on('close', () => { if (e.u === c) e.u = null; }); });
     c.on('error', () => {}); return;
   }
   const pid = H.nextPid++;
-  const ent = { c, u: null, lastSeen: Date.now() };
+  const ent = { c, u: null, lastSeen: Date.now() + 30000 }; // grace while ICE/TURN negotiates; reset on open
   H.conns.set(pid, ent); H.byPeer.set(c.peer, pid);
-  c.on('open', () => { try { c.send({ t: 'hi', you: pid }); c.send(metaMsg()); } catch {} });
+  c.on('open', () => { ent.lastSeen = Date.now(); H.fullFood = 3; try { c.send({ t: 'hi', you: pid }); c.send(metaMsg()); } catch {} });
   c.on('data', (d) => hostHandle(pid, d));
   c.on('close', () => { if (H.conns.get(pid) === ent) dropClient(pid); });
   c.on('error', (er) => { if (er && er.type === 'not-open-yet') return; if (H.conns.get(pid) === ent) dropClient(pid); });
+}
+// Compact wire snapshot (network proposals 1+2): fish without velocity/angle (clients derive them), and food only as
+// full-state entries for new flakes, flakes near a mouth (their path bends), a few round-robin resyncs per snapshot,
+// or every flake right after someone connects. Clients replay the rest of each flake's fall from its seed.
+const fEnt = (f) => [f.id, f.k, f.seed, f.rs, Math.round(f.x * 10), Math.round(f.y * 10), Math.round(f.dvx * 10), Math.round(f.t * 1000), Math.round(f.dart * 1000), Math.round(f.fade * 100)];
+function wireSnap(s, all, nowMs) {
+  const w = { t: 's', n: s.n, ph: s.ph, tl: s.tl, cd: s.cd, pl: s.pl, ev: s.ev,
+    p: all.map((p) => [p.id, Math.round(p.x), Math.round(p.y), +p.size.toFixed(3), p.score, p.f, p.out ? 1 : 0, p.pw ? Math.max(1, p.pw - nowMs) : 0]) };
+  const live = H.foods.filter((f) => !f.capd), n = H.tick, win = SNAP_EVERY * 3, full = H.fullFood > 0;
+  if (full) H.fullFood--;
+  const out = [];
+  // f.sh = the host's copy of exactly what clients are replaying; only resend when the real flake has strayed from it
+  for (const f of live) {
+    const why = !f.sh ? 'new' : full ? 'full' : f.rep && n - f.sentT <= SNAP_EVERY ? 'again' : Math.hypot(f.x - f.sh.x, f.y - f.sh.y) > 0.75 ? 'drift' : '';
+    if (why) { out.push(f); f.rep = why === 'new' || why === 'drift'; // new/corrected flakes go out twice (unreliable channel)
+      if (QS.has('test')) { const W = H.why || (H.why = {}); W[why] = (W[why] || 0) + 1; } }
+  }
+  for (let i = 0, c = 0; live.length && i < live.length && c < 2; i++) { const f = live[(H.rr = ((H.rr || 0) + 1) % live.length)]; if (!out.includes(f)) { out.push(f); c++; } }
+  if (out.length) w.fs = out.map((f) => { const e = fEnt(f); f.sentT = n; f.sh = applyEnt(flakeFromSeed(e[0], e[1], e[2]), e); return e; });
+  if (full || n % 30 === 0) w.fa = live.map((f) => f.id);
+  return w;
+}
+const applyEnt = (f, e) => Object.assign(f, { rs: e[3], x: e[4] / 10, y: e[5] / 10, dvx: e[6] / 10, t: e[7] / 1000, dart: e[8] / 1000, fade: e[9] / 100 });
+function expandSnap(d) {
+  const prev = V.snaps[V.snaps.length - 1];
+  const pm = prev && prev.p ? new Map(prev.p.map((q) => [q[0], q])) : new Map();
+  const dts = prev && prev.n != null ? Math.max(1, d.n - prev.n) * FDT : SNAP_EVERY * FDT;
+  d.p = (d.p || []).map((q) => {
+    const o = pm.get(q[0]); let vx = 0, vy = 0, a = 0;
+    if (o && !q[6] && !o[9]) { vx = (q[1] - o[1]) / dts; vy = (q[2] - o[2]) / dts; a = o[6]; }
+    const tilt = clamp(Math.atan2(vy, Math.abs(vx) + 60) * 0.7, -0.55, 0.55) * q[5];
+    a += (tilt - a) * Math.min(1, dts * 8);
+    return [q[0], q[1], q[2], q[3], q[4], q[5], a, vx, vy, q[6], q[7]];
+  });
+  // food replay
+  const S = V.fsim || (V.fsim = new Map());
+  if (d.ph !== 'play') S.clear();
+  const steps = V.fN != null ? clamp(d.n - V.fN, 0, 300) : 0; V.fN = d.n;
+  for (const f of S.values()) for (let i = 0; i < steps && f.fade > 0; i++) moveFlake(f, FDT, []);
+  for (const e of d.fs || []) {
+    if (eatenIds.has(e[0])) continue;
+    const f = S.get(e[0]) || flakeFromSeed(e[0], e[1], e[2]);
+    if (!S.has(e[0])) S.set(e[0], f);
+    if (QS.has('test') && S.get(e[0]) && f.t > 0) { const dr = Math.hypot(f.x - e[4] / 10, f.y - e[5] / 10); (V.fdrift || (V.fdrift = [])).push(dr); if (V.fdrift.length > 2000) V.fdrift.shift(); }
+    applyEnt(f, e);
+  }
+  for (const e of d.ev || []) S.delete(e[0]);
+  if (d.fa) { const keep = new Set(d.fa); for (const id of S.keys()) if (!keep.has(id)) S.delete(id); }
+  d.fd = [];
+  for (const [id, f] of S) { if (f.fade <= 0) { S.delete(id); continue; } d.fd.push([id, f.x, f.y, f.k, f.fade, 0, 0]); }
 }
 // local host actions
 function hostSet(patch) {
@@ -391,11 +452,18 @@ function hostSet(patch) {
   if (patch.dmin) s.min = clamp(s.min + patch.dmin, 1, 10);
   if (patch.dgoal) s.goal = clamp(s.goal + patch.dgoal * 5, 5, 100);
   if (patch.food && FOOD_RATE[patch.food]) s.food = patch.food;
+  if (patch.fl === 'p' || patch.fl === 'g') { const k = patch.fl === 'p' ? 'fp' : 'fg', o = patch.fl === 'p' ? 'fg' : 'fp'; const cur = k === 'fp' ? s.fp !== false : !!s.fg; if (!cur || (o === 'fp' ? s.fp !== false : !!s.fg)) s[k] = !cur; }
   if (patch.pw != null) { s.pw = !!patch.pw; if (!s.pw) { H.pill = null; for (const p of H.players.values()) powerDown(p, 'off'); } }
   bumpMeta();
 }
 
 /* ---------------- connection setup ---------------- */
+function startTicker(fn, ms) {
+  try {
+    const w = new Worker(URL.createObjectURL(new Blob([`setInterval(() => postMessage(0), ${ms});`], { type: 'text/javascript' })));
+    w.onmessage = () => fn(); return { w };
+  } catch { return { i: setInterval(fn, ms) }; }
+}
 function destroyPeer() { if (peer) { const p = peer; peer = null; try { p.destroy(); } catch {} } }
 function createRoom(tries = 0) {
   if (!LOCAL_BUS && typeof Peer === 'undefined') { $('#homeError').textContent = 'Could not load the real-time library. Check your connection and reload.'; return; }
@@ -404,62 +472,81 @@ function createRoom(tries = 0) {
   const p = makePeer(PREFIX + room); peer = p;
   p.on('open', () => {
     if (peer !== p) return;
-    myId = 0; history.replaceState(null, '', '?room=' + room + (LOCAL_BUS ? '&local=1' : ''));
-    H.lastT = now(); H.timer = setInterval(hostTick, TICK_MS);
+    if (p.opened && myId === 0) return; // reconnect after a signalling drop
+    p.opened = true; myId = 0; history.replaceState(null, '', '?room=' + room + (LOCAL_BUS ? '&local=1' : ''));
+    H.lastT = now(); H.timer = startTicker(hostTick, TICK_MS);
     showPick();
   });
   p.on('connection', (c) => { if (peer === p) onHostConnection(c); });
-  p.on('disconnected', () => { if (peer === p && !p.destroyed) setTimeout(() => { try { p.reconnect(); } catch {} }, 1500); });
+  let rc = 0;
+  const reconn = () => { if (peer !== p || p.destroyed || !p.disconnected) { rc = 0; return; } try { p.reconnect(); } catch {} setTimeout(reconn, Math.min(15000, 1500 * 2 ** rc++)); };
+  p.on('disconnected', () => { if (peer === p && !p.destroyed) setTimeout(reconn, 1000); }); // same id, so the room code keeps working
   p.on('error', (err) => {
     if (peer !== p) return;
+    if (p.opened || myId === 0) return; // room already running: signalling errors are retried by reconn(), never by a new room
     if (err.type === 'unavailable-id' && tries < 4) { createRoom(tries + 1); return; }
     if (err.type === 'peer-unavailable' || err.type === 'network' || err.type === 'server-error') return; // ignore stray errors once running
     $('#createBtn').disabled = false; $('#createBtn').textContent = 'Create a tank';
     $('#homeError').textContent = "Can't reach the room server. Your network may be blocking it. Try another network.";
   });
 }
-function joinRoom(code) {
+const JOIN_TRIES = 4, JOIN_TIMEOUT_MS = 15000, JOIN_BACKOFF = [0, 1500, 3500, 6000];
+function joinRoom(code, attempt = 0) {
   if (!LOCAL_BUS && typeof Peer === 'undefined') { $('#homeError').textContent = 'Could not load the real-time library. Check your connection and reload.'; return; }
-  destroyPeer(); role = 'client'; room = code;
-  $('#homeError').textContent = 'Swimming over to ' + code + '…';
-  const p = makePeer(); peer = p;
+  destroyPeer(); role = 'client'; room = code; hostConn = null; uConn = null; hostOpen = false; lastHostMsg = 0;
+  clearTimeout(joinRoom.t); clearTimeout(joinRoom.retry);
+  $('#homeError').textContent = attempt ? `Couldn't reach the room, retrying… (${attempt + 1}/${JOIN_TRIES})` : 'Swimming over to ' + code + '…';
+  const p = makePeer(); peer = p; let done = false;
+  // a connect that fails or stalls before it ever opened is a network problem, not the host leaving: retry with backoff
+  const fail = (why) => {
+    if (done || peer !== p || hostOpen) return; done = true; clearTimeout(joinRoom.t);
+    if (why === 'notfound') { destroyPeer(); role = null; showHome(); $('#homeError').textContent = `Room ${code} not found. Check the code, or create a new tank.`; return; }
+    if (attempt + 1 < JOIN_TRIES) { $('#homeError').textContent = `Couldn't reach the room, retrying… (${attempt + 2}/${JOIN_TRIES})`; joinRoom.retry = setTimeout(() => joinRoom(code, attempt + 1), JOIN_BACKOFF[attempt + 1]); return; }
+    destroyPeer(); role = null; showHome();
+    $('#homeError').textContent = why === 'server' ? "Can't reach the room server. Your network may be blocking it. Try another network."
+      : `Couldn't connect to room ${code}. The network may be slow or blocking it. Try again in a moment.`;
+  };
+  joinRoom.t = setTimeout(() => fail('timeout'), JOIN_TIMEOUT_MS + attempt * 5000); // relay (TURN) connects can take several seconds
   p.on('open', () => {
     if (peer !== p) return;
     const c = p.connect(PREFIX + code, { reliable: true, serialization: 'json' }); hostConn = c;
     c.on('open', () => {
-      if (hostConn !== c) return; lastHostMsg = Date.now(); history.replaceState(null, '', '?room=' + code + (LOCAL_BUS ? '&local=1' : ''));
+      if (hostConn !== c) return; hostOpen = true; done = true; clearTimeout(joinRoom.t); lastHostMsg = Date.now(); history.replaceState(null, '', '?room=' + code + (LOCAL_BUS ? '&local=1' : ''));
       // second, unordered channel for snapshots + steering so one late packet doesn't hold up the newer ones behind it
       try { const u = p.connect(PREFIX + code, { reliable: false, serialization: 'json', label: 'u' });
         u.on('open', () => { if (hostConn === c) uConn = u; }); u.on('data', (d) => { if (hostConn === c) { lastHostMsg = Date.now(); onClientData(d); } });
         u.on('close', () => { if (uConn === u) uConn = null; }); u.on('error', () => { if (uConn === u) uConn = null; }); } catch {}
     });
     c.on('data', (d) => { if (hostConn === c) { lastHostMsg = Date.now(); onClientData(d); } });
-    c.on('close', () => { if (hostConn === c) hostLeft(); });
-    c.on('error', () => { if (hostConn === c) hostLeft(); });
+    c.on('close', () => { if (hostConn !== c) return; if (hostOpen) hostLeft(); else fail('net'); });
+    c.on('error', (er) => { if (hostConn !== c || (er && er.type === 'not-open-yet')) return; if (hostOpen) hostLeft(); else fail('net'); });
   });
+  p.on('disconnected', () => { if (peer === p && !p.destroyed && hostOpen) setTimeout(() => { try { if (peer === p && p.disconnected) p.reconnect(); } catch {} }, 1000); }); // signalling only; data channel keeps working
   p.on('error', (err) => {
     if (peer !== p) return;
-    if (err.type === 'peer-unavailable' && !lastHostMsg) { destroyPeer(); showHome(); $('#homeError').textContent = `No tank called ${code}. Check the code, or create a new tank.`; return; }
-    if (!lastHostMsg) { $('#homeError').textContent = "Can't reach the room server. Your network may be blocking it. Try another network."; }
+    if (hostOpen) return; // connected: signalling hiccups don't matter
+    if (err.type === 'peer-unavailable') fail('notfound');
+    else if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error' || err.type === 'socket-closed') fail('server');
+    else fail('net');
   });
 }
 function hostLeft() {
-  if (leaving || role !== 'client' || !hostConn) return;
+  if (leaving || role !== 'client' || !hostConn || !hostOpen) return;
   hostConn = null; uConn = null; destroyPeer();
   showMsg('The host left the tank', 'This game ended because the host closed their page. Start a new tank to keep playing.');
 }
 function send(m) {
   if (role === 'host') { if (m.t === 'ready') { const p = H.players.get(0); if (p) { p.ready = !!m.v; bumpMeta(); } } else if (m.t === 'in') { const p = H.players.get(0); if (p) { p.ax = m.x; p.ay = m.y; p.inAt = Date.now(); } } else if (m.t === 'hello') hostHello(m); return; }
   const ch = m.t === 'in' && uConn && uConn.open ? uConn : hostConn;
-  if (ch) try { ch.send(m); } catch {}
+  if (ch && ch.open) try { ch.send(m); } catch {} // sending before 'open' makes PeerJS emit a 'not-open-yet' error on the connection
 }
 function hostHello(m) {
   if (H.players.has(0)) return;
   if (fishTaken(m.sp, m.c)) { onClientData({ t: 'taken' }); return; }
   addPlayer(0, { name: cleanName(m.name) || 'Host', sp: m.sp, c: m.c }); onClientData({ t: 'welcome', id: 0 });
 }
-setInterval(() => { if (role === 'client' && lastHostMsg && hostConn && Date.now() - lastHostMsg > 7000) hostLeft(); }, 1000);
-setInterval(() => { if (role === 'client' && hostConn) send({ t: 'p', c: now() }); }, 1000); // keep-alive + round-trip time
+setInterval(() => { if (role === 'client' && hostOpen && lastHostMsg && hostConn && Date.now() - lastHostMsg > 12000) hostLeft(); }, 1000);
+setInterval(() => { if (role === 'client' && hostConn && hostOpen) send({ t: 'p', c: now() }); }, 1000); // keep-alive + round-trip time
 
 /* ---------------- client: messages ---------------- */
 function onClientData(d) {
@@ -478,6 +565,7 @@ function onClientData(d) {
         const t = now(); if (V.lastAt) { const g = Math.min(400, t - V.lastAt); V.gapM += (g - V.gapM) * 0.1; V.gapD += (Math.abs(g - V.gapM) - V.gapD) * 0.1; } V.lastAt = t;
         V.idelay = clamp(V.gapM + 2.5 * V.gapD + 4, INTERP_MIN, INTERP_MAX);
       } else V.idelay = HOST_INTERP;
+      if (role === 'client' && !d.fd) expandSnap(d);
       d.at = now(); V.snaps.push(d); if (V.snaps.length > 10) V.snaps.shift();
       V.ph = d.ph; V.tl = d.tl; V.cd = d.cd;
       for (const e of d.ev || []) onEat(e);
@@ -497,7 +585,7 @@ function onClientData(d) {
 /* ---------------- UI: screens ---------------- */
 function setScreen(name) { document.body.className = 'screen-' + name + (document.body.classList.contains('urgent') ? ' urgent' : ''); }
 function showHome() {
-  setScreen('home'); $('#home').hidden = false; $('#pick').hidden = true; $('#hud').hidden = true; $('#board').hidden = true; $('#lobbyBar').hidden = true; $('#endScreen').hidden = true; $('#msg').hidden = true;
+  setScreen('home'); $('#home').hidden = false; $('#pick').hidden = true; $('#hud').hidden = true; $('#board').hidden = true; $('#roomTag').hidden = true; $('#lobbyBar').hidden = true; $('#endScreen').hidden = true; $('#msg').hidden = true;
   $('#createBtn').disabled = false; $('#createBtn').textContent = 'Create a tank';
 }
 let pickSp = null, pickC = null;
@@ -552,7 +640,7 @@ function dive() {
   setTimeout(() => { $('#diveBtn').disabled = false; }, 2500);
 }
 function showGame() {
-  setScreen('game'); $('#pick').hidden = true; $('#hud').hidden = false; $('#board').hidden = false;
+  setScreen('game'); $('#pick').hidden = true; $('#hud').hidden = false; $('#board').hidden = false; showRoomTag();
   if (matchMedia('(max-width: 720px)').matches) setBoardCollapsed(true);
   renderMetaUI();
 }
@@ -608,6 +696,8 @@ function renderMetaUI() {
   document.querySelectorAll('#foodSeg button').forEach((b) => { b.classList.toggle('on', b.dataset.food === set.food); b.disabled = !host; });
   const pwOn = set.pw !== false;
   document.querySelectorAll('#pwSeg button').forEach((b) => { b.classList.toggle('on', (b.dataset.pw === '1') === pwOn); b.disabled = !host; });
+  const flOn = { p: set.fp !== false, g: !!set.fg };
+  document.querySelectorAll('#flSeg button').forEach((b) => { b.classList.toggle('on', flOn[b.dataset.fl]); b.setAttribute('aria-pressed', flOn[b.dataset.fl]); b.disabled = !host; });
   $('#timerVal').textContent = set.min + ' min'; $('#goalVal').textContent = set.goal + ' pts';
   $('#timerStep').classList.toggle('dim', set.mode !== 'timer'); $('#goalStep').classList.toggle('dim', set.mode !== 'goal');
   document.querySelectorAll('.stepper button').forEach((b) => { b.disabled = !host; });
@@ -617,7 +707,7 @@ function renderMetaUI() {
   const inLobby = joined && m.ph === 'lobby';
   $('#lobbyBar').hidden = !inLobby;
   const pl = Object.entries(m.pl || {}); const ready = pl.filter(([, p]) => p[3]).length;
-  $('#readyCount').textContent = `${ready}/${pl.length} ready` + (host ? '' : ' · host starts the game') + ` · Power-ups ${set.pw !== false ? 'On ✨' : 'Off'}`;
+  $('#readyCount').textContent = `${ready}/${pl.length} ready` + (host ? '' : ' · host starts the game') + ` · Power-ups ${set.pw !== false ? 'On ✨' : 'Off'} · Flakes ${[set.fp !== false ? 'Pink 1pt' : '', set.fg ? 'Gold 2pt' : ''].filter(Boolean).join(' + ')}`;
   const me = m.pl && m.pl[myId]; readyLocal = !!(me && me[3]);
   $('#readyBtn').textContent = readyLocal ? 'Ready! ✓' : "I'm ready"; $('#readyBtn').classList.toggle('on', readyLocal);
   $('#startBtn').hidden = !host; $('#startBtn').classList.toggle('all-ready', pl.length > 0 && ready === pl.length);
@@ -931,7 +1021,7 @@ function drawFish(p, foods, t, dt) {
   const m = V.meta.pl[p.id]; if (!m) return;
   const fv = fishView(p.id);
   // bouncy grow spring toward real size
-  if (fv.holdUntil && t >= fv.holdUntil) { fv.holdUntil = 0; fv.snap = t; fv.vs += 2.6; } // gulp, then grow
+  if (fv.holdUntil && t >= fv.holdUntil) { fv.holdUntil = 0; fv.snap = t; } // gulp (no growth)
   const sharkHeld = fv.holdShark && t < fv.holdShark; // stay a shark for a beat after the chomp, then morph back
   const target = sharkHeld ? fv.sharkSize : fv.holdUntil ? Math.min(p.size, fv.holdSize) : p.size;
   fv.vs += (target - fv.ds) * 160 * dt; fv.vs *= Math.exp(-9 * dt); fv.ds += fv.vs * dt;
@@ -1259,6 +1349,15 @@ function updateHud(players, t) {
 }
 
 /* ---------------- copy helpers / wiring ---------------- */
+// room code above the leaderboard so friends can join mid-game
+function showRoomTag() { const el2 = $('#roomTag'); if (!room) { el2.hidden = true; return; } $('#roomCode').textContent = room; el2.hidden = false; }
+$('#roomCopy').addEventListener('click', async () => {
+  const txt = room; let ok = false;
+  try { await navigator.clipboard.writeText(txt); ok = true; } catch {
+    try { const ta = document.createElement('textarea'); ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); ok = document.execCommand('copy'); ta.remove(); } catch {}
+  }
+  toast(ok ? `Copied! Room ${txt}` : `Room code: ${txt}`);
+});
 function toast(msg) { const tt = $('#toast'); tt.textContent = msg; tt.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => tt.classList.remove('show'), 1600); }
 async function copy(text, label) {
   try { await navigator.clipboard.writeText(text); }
@@ -1269,7 +1368,7 @@ const inviteLink = () => location.origin + location.pathname + '?room=' + room +
 $('#copyCodeBtn').onclick = $('#pickCode').onclick = $('#menuCopy').onclick = () => copy(room, 'Room code ' + room);
 $('#copyLinkBtn').onclick = $('#menuLink').onclick = () => copy(inviteLink(), 'Invite link');
 $('#createBtn').onclick = () => createRoom();
-$('#joinForm').onsubmit = (e) => { e.preventDefault(); const c = cleanCode($('#codeInput').value); if (c.length < 4) { $('#homeError').textContent = 'Room codes are 5 letters.'; return; } joinRoom(c); };
+$('#joinForm').onsubmit = (e) => { e.preventDefault(); const c = cleanCode($('#codeInput').value); if (c.length !== 5) { $('#homeError').textContent = 'Room codes are 5 letters (no numbers, and no I, L or O).'; return; } joinRoom(c); };
 $('#codeInput').addEventListener('input', (e) => { e.target.value = cleanCode(e.target.value); });
 $('#diveBtn').onclick = dive;
 $('#nameInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') dive(); });
@@ -1283,6 +1382,7 @@ document.addEventListener('pointerdown', (e) => { if (!$('#menu').hidden && !e.t
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#menu').hidden) { closeMenu(); $('#menuBtn').focus(); } });
 document.querySelectorAll('#modeSeg button').forEach((b) => { b.onclick = () => hostSet({ mode: b.dataset.mode }); });
 document.querySelectorAll('#foodSeg button').forEach((b) => { b.onclick = () => hostSet({ food: b.dataset.food }); });
+document.querySelectorAll('#flSeg button').forEach((b) => { b.onclick = () => hostSet({ fl: b.dataset.fl }); });
 document.querySelectorAll('#pwSeg button').forEach((b) => { b.onclick = () => hostSet({ pw: b.dataset.pw === '1' }); });
 $('#timerStep').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) hostSet({ mode: 'timer', dmin: +b.dataset.d }); });
 $('#goalStep').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) hostSet({ mode: 'goal', dgoal: +b.dataset.d }); });

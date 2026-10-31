@@ -66,6 +66,10 @@
   <button id="menuBtn" class="menu-btn" aria-label="Menu" aria-expanded="false" aria-controls="menu"><span></span><span></span><span></span></button>
 </div>
 
+<div id="roomTag" hidden>
+  <button id="roomCopy" class="room-pill" aria-label="Copy room code"><span class="room-k">ROOM</span><b id="roomCode">-----</b><span class="room-ic" aria-hidden="true">⧉</span></button>
+  <span class="room-join">Join at <b>evenstevenbot.github.io<wbr>/games/finops</b></span>
+</div>
 <aside id="board" hidden>
   <button id="boardToggle" class="board-head" aria-expanded="true"><span class="bun">LEADERBOARD</span><span class="jp">ランキング</span><span id="boardMine" class="board-mine"></span><span class="chev">▾</span></button>
   <div id="boardRows" class="board-rows"></div>
@@ -109,6 +113,8 @@
     <div class="stepper" id="goalStep"><span>Goal</span><button data-d="-1" aria-label="Lower goal">−</button><b id="goalVal">20 pts</b><button data-d="1" aria-label="Higher goal">+</button></div>
     <div class="menu-h">Food quantity <span class="host-only">host only</span></div>
     <div class="seg" id="foodSeg"><button data-food="low">Low</button><button data-food="med">Medium</button><button data-food="high">High</button></div>
+    <div class="menu-h">Food flakes <span class="host-only">host only</span></div>
+    <div class="seg" id="flSeg"><button data-fl="p">🩷 Pink 1 pt</button><button data-fl="g">⭐ Gold 2 pt</button></div>
     <div class="menu-h">Power-ups <span class="host-only">host only</span></div>
     <div class="seg" id="pwSeg"><button data-pw="1">On</button><button data-pw="0">Off</button></div>
   </div>
